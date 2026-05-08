@@ -27,8 +27,6 @@ const KWIN_SCRIPT_TIMEOUT: Duration = Duration::from_secs(2);
 const KWIN_SCRIPTING_SERVICE: &str = "org.kde.KWin";
 const KWIN_SCRIPTING_OBJECT_PATH: &str = "/Scripting";
 const KWIN_SCRIPTING_INTERFACE: &str = "org.kde.kwin.Scripting";
-const KWIN_WINDOWS_RUNNER_OBJECT_PATH: &str = "/WindowsRunner";
-const KWIN_WINDOWS_RUNNER_INTERFACE: &str = "org.kde.krunner1";
 const KWIN_CALLBACK_OBJECT_PATH_PREFIX: &str = "/com/openai/Codex/KWinWindowQuery";
 const KWIN_CALLBACK_INTERFACE: &str = "com.openai.Codex.KWinWindowQuery";
 
@@ -609,26 +607,7 @@ async fn activate_kwin_window(window_id: u64) -> Result<()> {
     let uuid = kwin_uuid_for_window_id(window_id).await?.with_context(|| {
         format!("No KWin window matched window_id {window_id} during activation")
     })?;
-    let match_id = kwin_windows_runner_match_id(&uuid);
-
-    hydrate_session_bus_env();
-
-    let connection = zbus::Connection::session()
-        .await
-        .context("failed to connect to session bus")?;
-    let proxy = Proxy::new(
-        &connection,
-        KWIN_SCRIPTING_SERVICE,
-        KWIN_WINDOWS_RUNNER_OBJECT_PATH,
-        KWIN_WINDOWS_RUNNER_INTERFACE,
-    )
-    .await
-    .context("failed to create KWin WindowsRunner proxy")?;
-    let _: () = proxy
-        .call("Run", &(match_id.as_str(), ""))
-        .await
-        .with_context(|| format!("KWin WindowsRunner Run failed for {match_id}"))?;
-    Ok(())
+    call_kwin_activate_script(&uuid).await
 }
 
 async fn kwin_uuid_for_window_id(window_id: u64) -> Result<Option<String>> {
@@ -640,7 +619,40 @@ async fn kwin_uuid_for_window_id(window_id: u64) -> Result<Option<String>> {
     }))
 }
 
+#[derive(Debug, Deserialize)]
+struct KwinScriptResult {
+    #[serde(default)]
+    ok: bool,
+    error: Option<String>,
+}
+
+async fn call_kwin_activate_script(uuid: &str) -> Result<()> {
+    let uuid = uuid.to_string();
+    let json = call_kwin_script(|service_name, callback_object_path, plugin_name| {
+        write_kwin_activate_script(service_name, callback_object_path, plugin_name, &uuid)
+    })
+    .await?;
+    let result: KwinScriptResult =
+        serde_json::from_str(&json).context("failed to parse KWin activation script output")?;
+
+    if result.ok {
+        Ok(())
+    } else {
+        bail!(
+            "KWin activation script refused activation: {}",
+            result.error.unwrap_or_else(|| "unknown error".to_string())
+        );
+    }
+}
+
 async fn call_kwin_window_script() -> Result<String> {
+    call_kwin_script(write_kwin_window_script).await
+}
+
+async fn call_kwin_script<F>(write_script: F) -> Result<String>
+where
+    F: FnOnce(&str, &str, &str) -> Result<std::path::PathBuf>,
+{
     hydrate_session_bus_env();
 
     let connection = zbus::Connection::session()
@@ -662,7 +674,7 @@ async fn call_kwin_window_script() -> Result<String> {
     let mut script_path = None;
     let mut loaded_script = false;
     let result = async {
-        let path = write_kwin_window_script(&unique_name, &callback_object_path, &plugin_name)?;
+        let path = write_script(&unique_name, &callback_object_path, &plugin_name)?;
         script_path = Some(path.clone());
         let scripting_proxy = Proxy::new(
             &connection,
@@ -687,21 +699,21 @@ async fn call_kwin_window_script() -> Result<String> {
         let _: () = scripting_proxy
             .call("start", &())
             .await
-            .context("KWin start failed after loading the temporary window query script")?;
+            .context("KWin start failed after loading the temporary script")?;
 
         timeout(KWIN_SCRIPT_TIMEOUT, async move {
             loop {
                 match receiver.try_recv() {
                     Ok(json) => return Ok(json),
                     Err(mpsc::TryRecvError::Disconnected) => {
-                        bail!("KWin window query callback disconnected before returning data");
+                        bail!("KWin temporary script callback disconnected before returning data");
                     }
                     Err(mpsc::TryRecvError::Empty) => sleep(Duration::from_millis(20)).await,
                 }
             }
         })
         .await
-        .context("KWin temporary window query script did not return data before timeout")?
+        .context("KWin temporary script did not return data before timeout")?
     }
     .await;
 
@@ -741,6 +753,12 @@ impl KwinWindowCallback {
             .send(json.to_string())
             .map_err(|error| zbus::fdo::Error::Failed(error.to_string()))
     }
+
+    fn receive_result(&self, json: &str) -> zbus::fdo::Result<()> {
+        self.sender
+            .send(json.to_string())
+            .map_err(|error| zbus::fdo::Error::Failed(error.to_string()))
+    }
 }
 
 fn temporary_kwin_plugin_name() -> String {
@@ -757,11 +775,20 @@ fn write_kwin_window_script(
     callback_object_path: &str,
     plugin_name: &str,
 ) -> Result<std::path::PathBuf> {
+    let script = kwin_window_script_source(service_name, callback_object_path, plugin_name)?;
+    write_kwin_script_file(plugin_name, &script)
+}
+
+fn kwin_window_script_source(
+    service_name: &str,
+    callback_object_path: &str,
+    plugin_name: &str,
+) -> Result<String> {
     let service_name = serde_json::to_string(service_name)?;
     let object_path = serde_json::to_string(callback_object_path)?;
     let interface = serde_json::to_string(KWIN_CALLBACK_INTERFACE)?;
     let plugin_name_json = serde_json::to_string(plugin_name)?;
-    let script = format!(
+    Ok(format!(
         r#"(function() {{
     var serviceName = {service_name};
     var objectPath = {object_path};
@@ -875,7 +902,190 @@ fn write_kwin_window_script(
     }}));
 }})();
 "#
-    );
+    ))
+}
+
+fn write_kwin_activate_script(
+    service_name: &str,
+    callback_object_path: &str,
+    plugin_name: &str,
+    uuid: &str,
+) -> Result<std::path::PathBuf> {
+    let script =
+        kwin_activate_script_source(service_name, callback_object_path, plugin_name, uuid)?;
+    write_kwin_script_file(plugin_name, &script)
+}
+
+fn kwin_activate_script_source(
+    service_name: &str,
+    callback_object_path: &str,
+    plugin_name: &str,
+    uuid: &str,
+) -> Result<String> {
+    let target_uuid = normalize_kwin_uuid(uuid).context("KWin activation requires a uuid")?;
+    let service_name = serde_json::to_string(service_name)?;
+    let object_path = serde_json::to_string(callback_object_path)?;
+    let interface = serde_json::to_string(KWIN_CALLBACK_INTERFACE)?;
+    let plugin_name_json = serde_json::to_string(plugin_name)?;
+    let target_uuid = serde_json::to_string(&target_uuid)?;
+
+    Ok(format!(
+        r#"(function() {{
+    var serviceName = {service_name};
+    var objectPath = {object_path};
+    var iface = {interface};
+    var pluginName = {plugin_name_json};
+    var targetUuid = {target_uuid};
+
+    function send(payload) {{
+        payload.backend = "kwin";
+        payload.pluginName = pluginName;
+        callDBus(serviceName, objectPath, iface, "ReceiveResult", JSON.stringify(payload));
+    }}
+
+    function serialize(value) {{
+        if (value === null || value === undefined) {{
+            return null;
+        }}
+        if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {{
+            return value;
+        }}
+        try {{
+            if (typeof value.toString === "function") {{
+                return value.toString();
+            }}
+        }} catch (error) {{}}
+        return null;
+    }}
+
+    function read(obj, key) {{
+        try {{
+            if (obj === null || obj === undefined) {{
+                return null;
+            }}
+            var value = obj[key];
+            if (typeof value === "function") {{
+                return null;
+            }}
+            return serialize(value);
+        }} catch (error) {{
+            return null;
+        }}
+    }}
+
+    function normalizeUuid(value) {{
+        var text = serialize(value);
+        if (text === null || text === undefined) {{
+            return null;
+        }}
+        text = String(text).trim().toLowerCase();
+        if (text.charAt(0) === "{{" && text.charAt(text.length - 1) === "}}") {{
+            text = text.substring(1, text.length - 1);
+        }}
+        return text.length > 0 ? text : null;
+    }}
+
+    function windowUuid(window) {{
+        return normalizeUuid(read(window, "uuid")) || normalizeUuid(read(window, "internalId"));
+    }}
+
+    function listWindows() {{
+        try {{
+            if (typeof workspace.windowList === "function") {{
+                return workspace.windowList();
+            }}
+        }} catch (error) {{}}
+        try {{
+            if (workspace.stackingOrder && typeof workspace.stackingOrder.length === "number") {{
+                return workspace.stackingOrder;
+            }}
+        }} catch (error) {{}}
+        return [];
+    }}
+
+    function activateDesktop(window) {{
+        var desktops = null;
+        try {{
+            desktops = window.desktops;
+        }} catch (error) {{}}
+        if (desktops && desktops.length > 0) {{
+            try {{
+                workspace.currentDesktop = desktops[0];
+            }} catch (error) {{}}
+        }}
+    }}
+
+    try {{
+        var targetWindow = null;
+        var windows = listWindows();
+        for (var i = 0; i < windows.length; i++) {{
+            if (windowUuid(windows[i]) === targetUuid) {{
+                targetWindow = windows[i];
+                break;
+            }}
+        }}
+
+        if (!targetWindow) {{
+            throw new Error("window not found: " + targetUuid);
+        }}
+
+        try {{
+            targetWindow.minimized = false;
+        }} catch (error) {{}}
+        activateDesktop(targetWindow);
+
+        var activated = false;
+        var activationError = null;
+        try {{
+            workspace.activeWindow = targetWindow;
+            activated = true;
+        }} catch (error) {{
+            activationError = error;
+        }}
+        if (!activated) {{
+            try {{
+                workspace.activeClient = targetWindow;
+                activated = true;
+            }} catch (error) {{
+                activationError = error;
+            }}
+        }}
+        if (!activated) {{
+            try {{
+                if (typeof targetWindow.activate === "function") {{
+                    targetWindow.activate();
+                    activated = true;
+                }}
+            }} catch (error) {{
+                activationError = error;
+            }}
+        }}
+        if (!activated) {{
+            throw activationError || new Error("workspace refused activeWindow assignment");
+        }}
+
+        try {{
+            if (typeof workspace.raiseWindow === "function") {{
+                workspace.raiseWindow(targetWindow);
+            }}
+        }} catch (error) {{}}
+
+        send({{
+            ok: true,
+            uuid: windowUuid(targetWindow)
+        }});
+    }} catch (error) {{
+        send({{
+            ok: false,
+            error: String(error && error.message ? error.message : error)
+        }});
+    }}
+}})();
+"#
+    ))
+}
+
+fn write_kwin_script_file(plugin_name: &str, script: &str) -> Result<std::path::PathBuf> {
     for attempt in 0..4 {
         let filename = if attempt == 0 {
             format!("{plugin_name}.js")
@@ -1010,15 +1220,6 @@ fn kwin_window_id_from_uuid(uuid: &str) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
-}
-
-fn kwin_windows_runner_match_id(uuid: &str) -> String {
-    format!("0_{}", kwin_uuid_with_braces(uuid))
-}
-
-fn kwin_uuid_with_braces(uuid: &str) -> String {
-    let normalized = normalize_kwin_uuid(uuid).unwrap_or_else(|| uuid.trim().to_string());
-    format!("{{{normalized}}}")
 }
 
 fn normalize_kwin_uuid(uuid: &str) -> Option<String> {
@@ -1670,10 +1871,23 @@ mod tests {
             kwin_window_id_from_uuid(bare),
             kwin_window_id_from_uuid(braced_upper)
         );
-        assert_eq!(
-            kwin_windows_runner_match_id(bare),
-            "0_{b4dfacf8-a559-43c9-8b1f-ecd5cfd78359}"
-        );
+    }
+
+    #[test]
+    fn kwin_activation_script_focuses_window_directly() {
+        let script = kwin_activate_script_source(
+            ":1.234",
+            "/com/openai/Codex/KWinWindowQuery/test",
+            "codex_kwin_window_query_test",
+            "{B4DFACF8-A559-43C9-8B1F-ECD5CFD78359}",
+        )
+        .unwrap();
+
+        assert!(script.contains(r#"var targetUuid = "b4dfacf8-a559-43c9-8b1f-ecd5cfd78359";"#));
+        assert!(script.contains("targetWindow.minimized = false;"));
+        assert!(script.contains("workspace.activeWindow = targetWindow;"));
+        assert!(script.contains(r#""ReceiveResult""#));
+        assert!(!script.contains("WindowsRunner"));
     }
 
     #[test]

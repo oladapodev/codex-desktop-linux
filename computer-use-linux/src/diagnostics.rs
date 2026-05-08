@@ -379,7 +379,7 @@ fn windowing_report() -> WindowingReport {
             "A GNOME window listing backend is available for list_windows, focused_window, and targeted input verification."
         }
     } else {
-        "Window listing is unavailable or denied. Computer Use can still use screenshots, AT-SPI, and global ydotool input, but targeted window input cannot be verified. On GNOME, run setup_window_targeting to install the optional GNOME Shell extension backend. On KDE/Plasma, ensure KWin exposes org.kde.KWin scripting and WindowsRunner on the session bus. On Hyprland, ensure hyprctl is available in the session."
+        "Window listing is unavailable or denied. Computer Use can still use screenshots, AT-SPI, and global ydotool input, but targeted window input cannot be verified. On GNOME, run setup_window_targeting to install the optional GNOME Shell extension backend. On KDE/Plasma, ensure KWin exposes org.kde.KWin scripting on the session bus. On Hyprland, ensure hyprctl is available in the session."
     }
     .to_string();
 
@@ -406,13 +406,7 @@ fn kwin_windowing_check() -> Check {
         return Check::fail(format!("KWin scripting unavailable: {}", scripting.detail));
     }
 
-    let runner =
-        gdbus_introspect_contains("org.kde.KWin", "/WindowsRunner", "org.kde.krunner1", "Run");
-    if !runner.ok {
-        return Check::fail(format!("KWin WindowsRunner unavailable: {}", runner.detail));
-    }
-
-    Check::ok("KWin scripting and WindowsRunner are available on the session bus")
+    Check::ok("KWin scripting is available on the session bus")
 }
 
 fn hyprland_windowing_check() -> Check {
@@ -817,7 +811,7 @@ mod tests {
     fn readiness_treats_kwin_as_full_window_backend() {
         let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
         let mut windowing = windowing_report(false, false);
-        windowing.kwin = Check::ok("KWin scripting and WindowsRunner are available");
+        windowing.kwin = Check::ok("KWin scripting is available");
         windowing.can_list_windows = true;
         windowing.can_focus_apps = true;
         windowing.can_focus_windows = true;
