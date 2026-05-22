@@ -309,7 +309,7 @@ function applyBrowserAnnotationScreenshotPatch(currentSource) {
     const currentElementScreenshotRegex =
       /if\(([A-Za-z_$][\w$]*)&&([A-Za-z_$][\w$]*)\?\.anchor\.kind===`element`\)\{let e=[^;{}]+?\?\?null,t=e==null\?null:[A-Za-z_$][\w$]*\(e\);([A-Za-z_$][\w$]*)=t\?\.rect\?\?([A-Za-z_$][\w$]*)\(\2\.anchor\),([A-Za-z_$][\w$]*)=t\?\.borderRadius\}/;
     const currentCommentPreloadElementRegex =
-      /if\(([A-Za-z_$][\w$]*)&&([A-Za-z_$][\w$]*)\?\.annotation\.anchor\.kind===`element`\)\{let e=([A-Za-z_$][\w$]*)==null\?null:[A-Za-z_$][\w$]*\(\3\);([A-Za-z_$][\w$]*)=e\?\.rect\?\?([A-Za-z_$][\w$]*)\(\2\.annotation\.anchor\),([A-Za-z_$][\w$]*)=e\?\.borderRadius,([A-Za-z_$][\w$]*)=[A-Za-z_$][\w$]*\(\2\.annotation\.anchor,\4,[A-Za-z_$][\w$]*\.width,[A-Za-z_$][\w$]*\.height\)\}/;
+      /if\(([A-Za-z_$][\w$]*)&&([A-Za-z_$][\w$]*)\?\.annotation\.anchor\.kind===`element`\)\{let e=([A-Za-z_$][\w$]*)==null\?null:[A-Za-z_$][\w$]*\(\3\);([A-Za-z_$][\w$]*)=e\?\.rect\?\?([A-Za-z_$][\w$]*)\(\2\.annotation\.anchor\),([A-Za-z_$][\w$]*)=e\?\.borderRadius,([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\2\.annotation\.anchor,\4,([A-Za-z_$][\w$]*)\.width,([A-Za-z_$][\w$]*)\.height\)\}/;
     if (patchedSource.includes(currentSelectedElementNeedle)) {
       patchedSource = patchedSource.replace(currentSelectedElementNeedle, currentSelectedElementPatch);
     } else if (patchedSource.includes(currentCommentPreloadElementNeedle)) {
@@ -327,8 +327,20 @@ function applyBrowserAnnotationScreenshotPatch(currentSource) {
     } else if (currentCommentPreloadElementRegex.test(patchedSource)) {
       patchedSource = patchedSource.replace(
         currentCommentPreloadElementRegex,
-        (match, screenshotModeVar, selectedAnnotationVar, connectedElementVar, rectVar, anchorRectFn, radiusVar, highlightClassVar) =>
-          `if(${screenshotModeVar}&&${selectedAnnotationVar}?.annotation.anchor.kind===\`element\`){${rectVar}=${anchorRectFn}(${selectedAnnotationVar}.annotation.anchor),${radiusVar}=void 0,${highlightClassVar}=Wd(${selectedAnnotationVar}.annotation.anchor,${rectVar},S.width,S.height)}`,
+        (
+          _match,
+          screenshotModeVar,
+          selectedAnnotationVar,
+          _connectedElementVar,
+          rectVar,
+          anchorRectFn,
+          radiusVar,
+          highlightClassVar,
+          highlightFn,
+          widthSourceVar,
+          heightSourceVar,
+        ) =>
+          `if(${screenshotModeVar}&&${selectedAnnotationVar}?.annotation.anchor.kind===\`element\`){${rectVar}=${anchorRectFn}(${selectedAnnotationVar}.annotation.anchor),${radiusVar}=void 0,${highlightClassVar}=${highlightFn}(${selectedAnnotationVar}.annotation.anchor,${rectVar},${widthSourceVar}.width,${heightSourceVar}.height)}`,
       );
     } else {
       console.warn("WARN: Could not find browser annotation screenshot element highlight — skipping screenshot anchor patch");

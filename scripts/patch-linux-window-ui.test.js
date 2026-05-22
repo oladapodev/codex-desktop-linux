@@ -903,6 +903,20 @@ test("patches current comment preload screenshot anchor and marker shapes", () =
   );
 });
 
+test("patches drifted comment preload screenshot anchor helper names", () => {
+  const source =
+    "let rect=null,css=`hover-box`,radius;if(enabled&&selected?.annotation.anchor.kind===`element`){let e=node==null?null:measure(node);rect=e?.rect??anchorRect(selected.annotation.anchor),radius=e?.borderRadius,css=highlight(selected.annotation.anchor,rect,viewport.width,viewport.height)}";
+
+  const patched = applyPatchTwice(applyBrowserAnnotationScreenshotPatch, source);
+
+  assert.match(
+    patched,
+    /if\(enabled&&selected\?\.annotation\.anchor\.kind===`element`\)\{rect=anchorRect\(selected\.annotation\.anchor\),radius=void 0,css=highlight\(selected\.annotation\.anchor,rect,viewport\.width,viewport\.height\)\}/,
+  );
+  assert.doesNotMatch(patched, /\bWd\(/);
+  assert.doesNotMatch(patched, /\bS\.width\b/);
+});
+
 test("warns when a matched webview opaque bundle has no known insertion point", () => {
   const { warnings } = captureWarns(() =>
     applyLinuxOpaqueWindowsDefaultPatch("function runtime(){let C=theme;if(C.opaqueWindows&&!ba()){}}"),
