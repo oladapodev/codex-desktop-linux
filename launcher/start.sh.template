@@ -1762,7 +1762,11 @@ falsey_env_value() {
 
 scan_electron_rendering_arg() {
     case "$1" in
-        --ozone-platform|--ozone-platform=*|--ozone-platform-hint|--ozone-platform-hint=*)
+        --ozone-platform=*)
+            ELECTRON_OZONE_SWITCH_IN_ARGS=1
+            ELECTRON_OZONE_PLATFORM_ARG="${1#--ozone-platform=}"
+            ;;
+        --ozone-platform|--ozone-platform-hint|--ozone-platform-hint=*)
             ELECTRON_OZONE_SWITCH_IN_ARGS=1
             ;;
         --use-gl|--use-gl=*|--use-angle|--use-angle=*)
@@ -1839,7 +1843,20 @@ should_disable_gpu_compositing() {
     return 1
 }
 
+effective_electron_ozone_platform() {
+    if [ -n "$ELECTRON_OZONE_PLATFORM" ]; then
+        echo "$ELECTRON_OZONE_PLATFORM"
+        return 0
+    fi
+
+    if [ -n "$ELECTRON_OZONE_PLATFORM_ARG" ]; then
+        echo "$ELECTRON_OZONE_PLATFORM_ARG"
+    fi
+}
+
 should_force_renderer_accessibility() {
+    local effective_platform
+
     if [ -n "${CODEX_FORCE_RENDERER_ACCESSIBILITY:-}" ]; then
         if truthy_env_value "$CODEX_FORCE_RENDERER_ACCESSIBILITY"; then
             return 0
@@ -1856,8 +1873,13 @@ should_force_renderer_accessibility() {
     fi
 
     case "$ELECTRON_RENDERING_MODE" in
-        wslg|wayland-gpu)
+        wslg)
             return 1
+            ;;
+        wayland-gpu)
+            effective_platform="$(effective_electron_ozone_platform)"
+            [ "$effective_platform" = "wayland" ] && return 1
+            return 0
             ;;
     esac
 
@@ -1872,6 +1894,7 @@ set_electron_defaults() {
     ELECTRON_WSLG_DETECTED=0
     ELECTRON_PLATFORM_EXPLICIT=0
     ELECTRON_OZONE_SWITCH_IN_ARGS=0
+    ELECTRON_OZONE_PLATFORM_ARG=""
     ELECTRON_GL_SWITCH_PROVIDED=0
     ELECTRON_GL_SWITCH_ADDED=0
     ELECTRON_GPU_DISABLE_SWITCH_IN_ARGS=0
