@@ -502,14 +502,16 @@ patchFile(path.join(scriptsDir, "browser-client.mjs"), [
     alreadyText: "codexLinuxFilterBrowserBackends",
   },
   {
-    label: "remove Linux ambiguous Chrome extension alias guard",
-    oldText: String.raw`function lk({browserId:e,clientInfo:t,requestedBrowserId:r}){return cd(r)?eg(t.type)===r:e===r}function codexLinuxRejectAmbiguousBrowserAlias(e,t){if(p$.platform()!=="linux"||e!=="extension")return;let r=t.filter(n=>n.clientInfo.type==="extension");if(r.length<=1)return;let n=r.map(o=>{let i=o.clientInfo.metadata??{},s=i.profileName??i.profileDirectory??i.extensionInstanceId??"unknown-profile";return o.browserId+" ("+s+")"}).join(", ");throw new Error('Multiple Chrome extension instances are connected. Use a specific browser id instead of "extension": '+n)}var B$`,
-    newText: String.raw`function lk({browserId:e,clientInfo:t,requestedBrowserId:r}){return cd(r)?eg(t.type)===r:e===r}var B$`,
+    label: "Linux ambiguous active Chrome extension alias guard",
+    oldText: String.raw`function lk({browserId:e,clientInfo:t,requestedBrowserId:r}){return cd(r)?eg(t.type)===r:e===r}var B$`,
+    newText: String.raw`function lk({browserId:e,clientInfo:t,requestedBrowserId:r}){return cd(r)?eg(t.type)===r:e===r}function codexLinuxRejectAmbiguousBrowserAlias(e,t){if(p$.platform()!=="linux"||e!=="extension")return;let r=t.filter(n=>n.clientInfo.type==="extension");if(r.length<=1)return;let n=r.map(o=>{let i=o.clientInfo.metadata??{},s=i.profileName??i.profileDirectory??i.extensionInstanceId??"unknown-profile";return o.browserId+" ("+s+")"}).join(", ");throw new Error('Multiple Chrome extension instances are connected. Use a specific browser id instead of "extension": '+n)}var B$`,
+    alreadyText: "codexLinuxRejectAmbiguousBrowserAlias",
   },
   {
-    label: "remove Linux ambiguous Chrome extension alias check",
-    oldText: String.raw`if(cd(p.browser_id)){let h=dd(p.browser_id);tg(h)||hk({diagnostics:n,reason:"backend-disabled",requestedBrowserId:p.browser_id}),ck(h),codexLinuxRejectAmbiguousBrowserAlias(p.browser_id,i)}let f=i.find`,
-    newText: String.raw`if(cd(p.browser_id)){let h=dd(p.browser_id);tg(h)||hk({diagnostics:n,reason:"backend-disabled",requestedBrowserId:p.browser_id}),ck(h)}let f=i.find`,
+    label: "Linux ambiguous active Chrome extension alias check",
+    oldText: String.raw`if(cd(p.browser_id)){let h=dd(p.browser_id);tg(h)||hk({diagnostics:n,reason:"backend-disabled",requestedBrowserId:p.browser_id}),ck(h)}let f=i.find`,
+    newText: String.raw`if(cd(p.browser_id)){let h=dd(p.browser_id);tg(h)||hk({diagnostics:n,reason:"backend-disabled",requestedBrowserId:p.browser_id}),ck(h),codexLinuxRejectAmbiguousBrowserAlias(p.browser_id,i)}let f=i.find`,
+    alreadyText: "codexLinuxRejectAmbiguousBrowserAlias(p.browser_id,i)",
   },
 ]);
 
@@ -533,10 +535,19 @@ if (extensionInfos.length === 1) {
   const summaries = [];
   for (const info of extensionInfos) {
     const candidate = await agent.browsers.get(info.id);
-    const tabs = await candidate.user.openTabs().catch((error) => [
-      { error: String(error) },
-    ]);
-    summaries.push({ id: info.id, metadata: info.metadata, tabs });
+    let tabs = [];
+    let error;
+    try {
+      tabs = await candidate.user.openTabs();
+    } catch (caught) {
+      error = String(caught);
+    }
+    summaries.push({
+      id: info.id,
+      metadata: info.metadata,
+      tabs: Array.isArray(tabs) ? tabs : [],
+      ...(error ? { error } : {}),
+    });
   }
   const activeSummaries = summaries.filter(
     ({ tabs }) => Array.isArray(tabs) && tabs.length > 0,
@@ -594,10 +605,19 @@ if (extensionInfos.length === 1) {
   const summaries = [];
   for (const info of extensionInfos) {
     const candidate = await agent.browsers.get(info.id);
-    const tabs = await candidate.user.openTabs().catch((error) => [
-      { error: String(error) },
-    ]);
-    summaries.push({ id: info.id, metadata: info.metadata, tabs });
+    let tabs = [];
+    let error;
+    try {
+      tabs = await candidate.user.openTabs();
+    } catch (caught) {
+      error = String(caught);
+    }
+    summaries.push({
+      id: info.id,
+      metadata: info.metadata,
+      tabs: Array.isArray(tabs) ? tabs : [],
+      ...(error ? { error } : {}),
+    });
   }
   const activeSummaries = summaries.filter(
     ({ tabs }) => Array.isArray(tabs) && tabs.length > 0,
@@ -615,6 +635,27 @@ if (extensionInfos.length === 1) {
 }
 nodeRepl.write(await browser.documentation());`,
     alreadyText: "activeSummaries",
+  },
+  {
+    label: "Chrome active profile bootstrap ignores tab probe errors",
+    oldText: `    const tabs = await candidate.user.openTabs().catch((error) => [
+      { error: String(error) },
+    ]);
+    summaries.push({ id: info.id, metadata: info.metadata, tabs });`,
+    newText: `    let tabs = [];
+    let error;
+    try {
+      tabs = await candidate.user.openTabs();
+    } catch (caught) {
+      error = String(caught);
+    }
+    summaries.push({
+      id: info.id,
+      metadata: info.metadata,
+      tabs: Array.isArray(tabs) ? tabs : [],
+      ...(error ? { error } : {}),
+    });`,
+    alreadyText: "tabs: Array.isArray(tabs) ? tabs : []",
   },
   {
     label: "Chrome profile launch guard",
