@@ -4,6 +4,10 @@ info() {
     echo "[INFO] $*" >&2
 }
 
+warn() {
+    echo "[WARN] $*" >&2
+}
+
 error() {
     echo "[ERROR] $*" >&2
     exit 1
@@ -447,8 +451,18 @@ find_cargo_command() {
     return 1
 }
 
+updater_build_output_binary() {
+    local target_dir="${CARGO_TARGET_DIR:-$REPO_DIR/target}"
+    case "$target_dir" in
+        /*) ;;
+        *) target_dir="$REPO_DIR/$target_dir" ;;
+    esac
+    printf '%s\n' "$target_dir/release/codex-update-manager"
+}
+
 ensure_updater_binary() {
     local cargo_cmd=""
+    local built_binary=""
 
     if ! package_with_updater_enabled; then
         return
@@ -466,6 +480,10 @@ Install the Rust toolchain:
 
     info "Building codex-update-manager release binary"
     "$cargo_cmd" build --release -p codex-update-manager >&2
+    built_binary="$(updater_build_output_binary)"
+    if [ -x "$built_binary" ]; then
+        UPDATER_BINARY_SOURCE="$built_binary"
+    fi
     [ -x "$UPDATER_BINARY_SOURCE" ] || error "Failed to build updater binary: $UPDATER_BINARY_SOURCE"
 }
 
@@ -531,18 +549,97 @@ function sanitizeGitRemoteUrl(remote) {
   return value;
 }
 
+function readJsonFile(filePath) {
+  try {
+    const value = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    return value != null && typeof value === "object" && !Array.isArray(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseWrapperVersion(content) {
+  for (const line of content.split(/\r?\n/)) {
+    const match = line.trim().match(/^version\s*=\s*"([^"]+)"/);
+    if (match) {
+      return match[1];
+    }
+  }
+  return null;
+}
+
+function readWrapperVersion(repoDir) {
+  try {
+    return parseWrapperVersion(fs.readFileSync(path.join(repoDir, "updater", "Cargo.toml"), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function sanitizeSourceInfo(info) {
+  const remote = sanitizeGitRemoteUrl(info.remote);
+  return {
+    ...info,
+    version: info.version ?? readWrapperVersion(repoDir),
+    remote,
+    commitUrl: githubCommitUrl(remote, info.commit),
+    provenance: info.provenance ?? "packaged-update-builder",
+    recapturedAt: isoTimestamp(),
+  };
+}
+
+function githubCommitUrl(remote, commit) {
+  const sha = typeof commit === "string" ? commit.trim() : "";
+  if (!/^[0-9a-f]{7,40}$/i.test(sha)) {
+    return null;
+  }
+  const value = sanitizeGitRemoteUrl(remote);
+  if (value == null) {
+    return null;
+  }
+
+  let ownerAndRepo = null;
+  try {
+    const url = new URL(value);
+    if (url.hostname.toLowerCase() !== "github.com") {
+      return null;
+    }
+    ownerAndRepo = url.pathname.replace(/^\/+/, "");
+  } catch {
+    const scpMatch = value.match(/^(?:[^@]+@)?github\.com:([^/]+\/[^/]+?)(?:\.git)?$/i);
+    if (scpMatch) {
+      ownerAndRepo = scpMatch[1];
+    }
+  }
+
+  if (ownerAndRepo == null) {
+    return null;
+  }
+  ownerAndRepo = ownerAndRepo.replace(/\/+$/, "").replace(/\.git$/i, "");
+  if (!/^[^/\s]+\/[^/\s]+$/.test(ownerAndRepo)) {
+    return null;
+  }
+  return `https://github.com/${ownerAndRepo}/commit/${sha}`;
+}
+
+const stagedInfo = readJsonFile(path.join(repoDir, ".codex-linux", "source-info.json"));
 const commit = process.env.CODEX_LINUX_SOURCE_COMMIT?.trim() || git(["rev-parse", "HEAD"]);
 const status = git(["status", "--porcelain"]);
-const info = {
-  commit,
-  shortCommit: commit == null ? null : commit.slice(0, 12),
-  branch: process.env.CODEX_LINUX_SOURCE_BRANCH?.trim() || git(["branch", "--show-current"]),
-  remote: sanitizeGitRemoteUrl(process.env.CODEX_LINUX_SOURCE_REMOTE?.trim() || git(["remote", "get-url", "origin"])),
-  describe: process.env.CODEX_LINUX_SOURCE_DESCRIBE?.trim() || git(["describe", "--always", "--dirty", "--tags"]),
-  dirty: status == null ? null : status.length > 0,
-  provenance: "packaged-update-builder",
-  capturedAt: isoTimestamp(),
-};
+const remote = sanitizeGitRemoteUrl(process.env.CODEX_LINUX_SOURCE_REMOTE?.trim() || git(["remote", "get-url", "origin"]));
+const info = stagedInfo?.commit
+  ? sanitizeSourceInfo(stagedInfo)
+  : {
+      commit,
+      shortCommit: commit == null ? null : commit.slice(0, 12),
+      version: readWrapperVersion(repoDir),
+      branch: process.env.CODEX_LINUX_SOURCE_BRANCH?.trim() || git(["branch", "--show-current"]),
+      remote,
+      commitUrl: githubCommitUrl(remote, commit),
+      describe: process.env.CODEX_LINUX_SOURCE_DESCRIBE?.trim() || git(["describe", "--always", "--dirty", "--tags"]),
+      dirty: status == null ? null : status.length > 0,
+      provenance: "packaged-update-builder",
+      capturedAt: isoTimestamp(),
+    };
 
 fs.mkdirSync(path.dirname(infoFile), { recursive: true });
 fs.writeFileSync(infoFile, `${JSON.stringify(info, null, 2)}\n`, "utf8");
@@ -573,6 +670,7 @@ stage_common_package_files() {
     cp -aT "$APP_DIR" "$app_root"
     mkdir -p "$app_root/.codex-linux"
     cp "$ICON_SOURCE" "$app_root/.codex-linux/$PACKAGE_NAME.png"
+    cp "$(resolve_tray_icon_source "$app_root")" "$app_root/.codex-linux/$PACKAGE_NAME-tray.png"
     render_desktop_entry_doctor_helper "$app_root/.codex-linux/codex-desktop-entry-doctor.sh"
     render_desktop_entry "$root/usr/share/applications/$PACKAGE_NAME.desktop"
     cp "$ICON_SOURCE" "$root/usr/share/icons/hicolor/256x256/apps/$PACKAGE_NAME.png"
@@ -590,6 +688,31 @@ stage_common_package_files() {
     render_packaged_runtime_helper "$app_root/.codex-linux/codex-packaged-runtime.sh"
 }
 
+resolve_tray_icon_source() {
+    local app_root="$1"
+    local assets_dir="$app_root/content/webview/assets"
+    local -a candidates=()
+    local candidate
+
+    if [ -d "$assets_dir" ]; then
+        while IFS= read -r -d '' candidate; do
+            candidates+=("$candidate")
+        done < <(find "$assets_dir" -maxdepth 1 -type f -name 'app-*.png' -print0 | sort -z)
+    fi
+
+    if [ "${#candidates[@]}" -eq 1 ]; then
+        printf '%s\n' "${candidates[0]}"
+        return 0
+    fi
+
+    if [ "${#candidates[@]}" -gt 1 ]; then
+        warn "Multiple tray icon candidates found in $assets_dir; falling back to package icon"
+    else
+        warn "Could not resolve a unique tray icon in $assets_dir; falling back to package icon"
+    fi
+    printf '%s\n' "$ICON_SOURCE"
+}
+
 stage_update_builder_bundle() {
     local root="$1"
     local update_builder_root="$root/opt/$PACKAGE_NAME/update-builder"
@@ -605,6 +728,7 @@ stage_update_builder_bundle() {
         "$update_builder_root/assets"
 
     cp "$REPO_DIR/install.sh" "$update_builder_root/install.sh"
+    cp "$REPO_DIR/CHANGELOG.md" "$update_builder_root/CHANGELOG.md"
     cp "$REPO_DIR/launcher/start.sh.template" "$update_builder_root/launcher/start.sh.template"
     cp "$REPO_DIR/launcher/webview-server.py" "$update_builder_root/launcher/webview-server.py"
     cp "$REPO_DIR/Cargo.toml" "$update_builder_root/Cargo.toml"
