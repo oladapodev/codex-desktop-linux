@@ -78,35 +78,32 @@ function applyFramelessTitlebarOverlaySyncPatch(currentSource) {
 
 function applyFramelessTitlebarMenuPatch(currentSource) {
   const menuRegex = /process\.platform===`win32`&&([A-Za-z_$][\w$]*)\.removeMenu\(\),/g;
-  let patchedAny = false;
-  const patchedSource = currentSource.replace(menuRegex, (match, windowVar, offset) => {
-    const linuxPatch = `process.platform===\`linux\`&&(${windowVar}.setMenuBarVisibility(!1),${windowVar}.removeMenu?.()),`;
-    const legacyLinuxPatch = `process.platform===\`linux\`&&${windowVar}.setMenuBarVisibility(!1),`;
-    if (currentSource.slice(Math.max(0, offset - linuxPatch.length), offset) === linuxPatch) {
-      return match;
-    }
-    if (currentSource.slice(Math.max(0, offset - legacyLinuxPatch.length), offset) === legacyLinuxPatch) {
-      patchedAny = true;
+  let patchedSource = currentSource
+    .replace(
+      /process\.platform===`linux`&&\(([A-Za-z_$][\w$]*)\.setMenuBarVisibility\(!1\),\1\.removeMenu\?\.\(\)\),process\.platform===`win32`&&\1\.removeMenu\(\),/g,
+      (_match, windowVar) => `process.platform===\`linux\`&&${windowVar}.removeMenu(),process.platform===\`win32\`&&${windowVar}.removeMenu(),`,
+    )
+    .replace(
+      /process\.platform===`linux`&&([A-Za-z_$][\w$]*)\.setMenuBarVisibility\(!1\),process\.platform===`win32`&&\1\.removeMenu\(\),/g,
+      (_match, windowVar) => `process.platform===\`linux\`&&${windowVar}.removeMenu(),process.platform===\`win32\`&&${windowVar}.removeMenu(),`,
+    );
+  let patchedAny = patchedSource !== currentSource;
+  patchedSource = patchedSource.replace(menuRegex, (match, windowVar, offset, source) => {
+    const linuxPatch = `process.platform===\`linux\`&&${windowVar}.removeMenu(),`;
+    if (source.slice(Math.max(0, offset - linuxPatch.length), offset) === linuxPatch) {
       return match;
     }
     patchedAny = true;
     return `${linuxPatch}${match}`;
   });
 
-  const upgradedSource = patchedSource.replace(
-    /process\.platform===`linux`&&([A-Za-z_$][\w$]*)\.setMenuBarVisibility\(!1\),process\.platform===`win32`&&\1\.removeMenu\(\),/g,
-    (_match, windowVar) =>
-      `process.platform===\`linux\`&&(${windowVar}.setMenuBarVisibility(!1),${windowVar}.removeMenu?.()),process.platform===\`win32\`&&${windowVar}.removeMenu(),`,
-  );
-
-  if (!patchedAny && !currentSource.includes("setMenuBarVisibility(!1)")) {
-    const hasWindowsRemoveMenu = /process\.platform===`win32`&&[A-Za-z_$][\w$]*\.removeMenu\(\),/.test(currentSource);
-    if (hasWindowsRemoveMenu) {
-      console.warn("WARN: Could not find window menu visibility snippet - skipping frameless titlebar menu patch");
-    }
+  const hasWindowsRemoveMenu = /process\.platform===`win32`&&[A-Za-z_$][\w$]*\.removeMenu\(\),/.test(patchedSource);
+  const hasLinuxRemoveMenu = /process\.platform===`linux`&&([A-Za-z_$][\w$]*)\.removeMenu\(\),process\.platform===`win32`&&\1\.removeMenu\(\),/.test(patchedSource);
+  if (!patchedAny && hasWindowsRemoveMenu && !hasLinuxRemoveMenu) {
+    console.warn("WARN: Could not find window menu visibility snippet - skipping frameless titlebar menu patch");
   }
 
-  return upgradedSource;
+  return patchedSource;
 }
 
 function applyFramelessTitlebarMainPatch(currentSource) {
@@ -131,19 +128,36 @@ function applyFramelessTitlebarWebviewPatch(currentSource) {
     patchedSource = patchedSource.split(linuxApplicationMenuChrome).join(linuxNativeChrome);
   }
 
-  const linuxApplicationMenuBrowserGate =
-    "i.includes(`win`)||r.includes(`windows`)||i.includes(`linux`)?t??l.applicationMenu:l.default";
-  const linuxNativeBrowserGate =
-    "i.includes(`win`)||r.includes(`windows`)?t??l.applicationMenu:l.default";
-  const foundApplicationMenuBrowserGate = patchedSource.includes(linuxApplicationMenuBrowserGate);
-  const hasNativeBrowserGate = patchedSource.includes(linuxNativeBrowserGate);
-  if (foundApplicationMenuBrowserGate) {
-    patchedSource = patchedSource.split(linuxApplicationMenuBrowserGate).join(linuxNativeBrowserGate);
-  }
+  const linuxApplicationMenuBrowserGateRegex =
+    /([A-Za-z_$][\w$]*)\.includes\(`win`\)\|\|([A-Za-z_$][\w$]*)\.includes\(`windows`\)\|\|\1\.includes\(`linux`\)\?([A-Za-z_$][\w$]*)\?\?([A-Za-z_$][\w$]*)\.applicationMenu:\4\.default/g;
+  const nativeApplicationMenuBrowserGateRegex =
+    /([A-Za-z_$][\w$]*)\.includes\(`win`\)\|\|([A-Za-z_$][\w$]*)\.includes\(`windows`\)\?\w+\?\?[A-Za-z_$][\w$]*\.applicationMenu:[A-Za-z_$][\w$]*\.default/;
+  let foundApplicationMenuBrowserGate = false;
+  patchedSource = patchedSource.replace(
+    linuxApplicationMenuBrowserGateRegex,
+    (_match, platformAlias, userAgentAlias, fallbackAlias, layoutAlias) => {
+      foundApplicationMenuBrowserGate = true;
+      return `${platformAlias}.includes(\`win\`)||${userAgentAlias}.includes(\`windows\`)?${fallbackAlias}??${layoutAlias}.applicationMenu:${layoutAlias}.default`;
+    },
+  );
+  const hasNativeBrowserGate = nativeApplicationMenuBrowserGateRegex.test(patchedSource);
+
+  const applicationMenuBridgeRegex =
+    /function ([A-Za-z_$][\w$]*)\(\)\{return ([A-Za-z_$][\w$]*)\(\)&&window\.electronBridge\?\.showApplicationMenu!=null\}/g;
+  let foundApplicationMenuBridge = false;
+  patchedSource = patchedSource.replace(applicationMenuBridgeRegex, (_match, functionName) => {
+    foundApplicationMenuBridge = true;
+    return `function ${functionName}(){return!1}`;
+  });
 
   const recognizedChromeMapping = foundApplicationMenuChrome || hasNativeChrome;
   const recognizedBrowserGate = foundApplicationMenuBrowserGate || hasNativeBrowserGate;
-  if (!recognizedChromeMapping && !recognizedBrowserGate && currentSource.includes("applicationMenu:Object.freeze({left:0,right:")) {
+  if (
+    !recognizedChromeMapping &&
+    !recognizedBrowserGate &&
+    !foundApplicationMenuBridge &&
+    currentSource.includes("applicationMenu:Object.freeze({left:0,right:")
+  ) {
     console.warn("WARN: Could not find Linux window controls chrome mapping - skipping frameless webview chrome patch");
   }
 
@@ -163,15 +177,15 @@ const patches = [
     phase: "webview-asset",
     order: 20_730,
     ciPolicy: "optional",
-    pattern: /^use-window-controls-safe-area-.*\.js$/,
-    missingDescription: "window controls safe-area bundle",
+    pattern: /^app-initial~app-main~onboarding-page-.*\.js$/,
+    missingDescription: "main app chrome bundle",
     skipDescription: "frameless titlebar webview layout patch",
     apply: applyFramelessTitlebarWebviewPatch,
   },
 ];
 
 module.exports = {
-  patches,
+  descriptors: patches,
   applyFramelessTitlebarBranchPatch,
   applyFramelessTitlebarMainPatch,
   applyFramelessTitlebarMenuPatch,
