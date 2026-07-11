@@ -165,6 +165,17 @@ else
 fi
 monitor_pid="$APPSHOT_XINPUT_PID"
 event_fd="${APPSHOT_XINPUT[0]}"
+
+sleep 0.1
+if ! kill -0 "$monitor_pid" >/dev/null 2>&1; then
+    monitor_status=0
+    wait "$monitor_pid" || monitor_status=$?
+    monitor_pid=""
+    [ "$monitor_status" -ne 0 ] || monitor_status=1
+    echo "permission-denied"
+    exit "$monitor_status"
+fi
+
 echo "ready"
 
 pending=""

@@ -214,7 +214,7 @@ test("bare modifier monitor emits one transition from one XInput2 stream", () =>
       "  'EVENT type 14 (RawKeyRelease)' '    detail: 50' \\",
       "  'EVENT type 13 (RawKeyPress)' '    detail: 62' \\",
       "  'EVENT type 14 (RawKeyRelease)' '    detail: 62'",
-      "sleep 0.1",
+      "sleep 0.25",
     ].join("\n"),
     { mode: 0o755 },
   );
@@ -231,6 +231,39 @@ test("bare modifier monitor emits one transition from one XInput2 stream", () =>
     });
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(result.stdout.trim().split("\n"), ["ready", "down", "up"]);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("bare modifier monitor fails before ready when XInput2 exits during startup", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "appshots-xinput2-startup-"));
+  const binDir = path.join(tempDir, "bin");
+  const helper = path.join(__dirname, "bin", "bare-modifier-monitor");
+  fs.mkdirSync(binDir);
+  fs.writeFileSync(
+    path.join(binDir, "xmodmap"),
+    "#!/bin/sh\nprintf '%s\\n' 'keycode 50 = Shift_L' 'keycode 62 = Shift_R'\n",
+    { mode: 0o755 },
+  );
+  fs.writeFileSync(
+    path.join(binDir, "xinput"),
+    "#!/bin/sh\n[ \"$1 $2\" = \"test-xi2 --root\" ] || exit 2\nexit 2\n",
+    { mode: 0o755 },
+  );
+
+  try {
+    const result = spawnSync(helper, ["--key", "DoubleShift", "--immediate"], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        DISPLAY: ":99",
+        PATH: `${binDir}:${process.env.PATH}`,
+      },
+      timeout: 2_000,
+    });
+    assert.notEqual(result.status, 0, result.stderr);
+    assert.equal(result.stdout, "permission-denied\n");
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
