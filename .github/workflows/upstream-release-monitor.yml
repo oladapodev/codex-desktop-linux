@@ -468,4 +468,11 @@ jobs:
                 previewResult: process.env.PREVIEW_RESULT,
               },
             });
+            if (result.action === 'issues-disabled') {
+              core.warning('GitHub Issues are disabled; writing the monitor dashboard to this run summary.');
+              await core.summary
+                .addHeading('Upstream PR and release monitor')
+                .addRaw(result.body)
+                .write();
+            }
             core.notice('Monitor issue action: ' + result.action);

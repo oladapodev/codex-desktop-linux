@@ -113,4 +113,6 @@ One managed issue titled `Upstream PR and release monitor` lists:
 
 The workflow updates only an issue containing its hidden ownership marker. It
 does not take over a maintainer-created issue that happens to use the same
-label.
+label. If GitHub Issues are disabled for the fork, the workflow writes the same
+dashboard to the Actions run summary and completes successfully. Enabling
+Issues later automatically restores the persistent managed issue.

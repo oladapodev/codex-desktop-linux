@@ -299,6 +299,33 @@ test("reconciliation updates the marked issue instead of creating duplicates", a
   assert.equal(fixture.calls.filter(([name]) => name === "create").length, 0);
 });
 
+test("reconciliation falls back to a dashboard body when Issues are disabled", async () => {
+  const fixture = fakeGithub();
+  fixture.github.rest.issues.create = async () => {
+    const error = new Error("Issues has been disabled in this repository.");
+    error.status = 410;
+    throw error;
+  };
+  const result = await reconcileMonitorIssue({
+    github: fixture.github,
+    repo: { owner: "fork", repo: "repo" },
+    snapshot: {
+      upstreamRepository: "upstream/repo",
+      upstreamHeadSha: sha("d"),
+      stableRelease: null,
+      pulls: [],
+      releases: [],
+      queuedCount: 0,
+      runUrl: "https://example.test/run",
+      stableResult: "success",
+      previewResult: "success",
+    },
+  });
+
+  assert.equal(result.action, "issues-disabled");
+  assert.ok(result.body.startsWith(ISSUE_MARKER));
+});
+
 test("workflow keeps unmerged execution separate from write credentials", () => {
   const previewWorkflow = fs.readFileSync(
     ".github/workflows/upstream-preview-build.yml",

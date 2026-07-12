@@ -361,28 +361,33 @@ async function ensureLabel(github, repo) {
 }
 
 async function reconcileMonitorIssue({ github, repo, snapshot }) {
-  await ensureLabel(github, repo);
-  const issues = await paginate(github, github.rest.issues.listForRepo, {
-    ...repo,
-    state: "all",
-    labels: LABEL,
-    per_page: 100,
-  });
-  const owned = issues.find((issue) => issue.pull_request == null && issue.body?.includes(ISSUE_MARKER));
   const title = "Upstream PR and release monitor";
   const body = dashboardBody(snapshot);
-  if (owned) {
-    await github.rest.issues.update({
+  try {
+    await ensureLabel(github, repo);
+    const issues = await paginate(github, github.rest.issues.listForRepo, {
       ...repo,
-      issue_number: owned.number,
-      title,
-      body,
-      state: "open",
+      state: "all",
+      labels: LABEL,
+      per_page: 100,
     });
-    return { action: "updated", issueNumber: owned.number };
+    const owned = issues.find((issue) => issue.pull_request == null && issue.body?.includes(ISSUE_MARKER));
+    if (owned) {
+      await github.rest.issues.update({
+        ...repo,
+        issue_number: owned.number,
+        title,
+        body,
+        state: "open",
+      });
+      return { action: "updated", issueNumber: owned.number };
+    }
+    const created = await github.rest.issues.create({ ...repo, title, body, labels: [LABEL] });
+    return { action: "created", issueNumber: created.data.number };
+  } catch (error) {
+    if (error?.status === 410) return { action: "issues-disabled", body };
+    throw error;
   }
-  const created = await github.rest.issues.create({ ...repo, title, body, labels: [LABEL] });
-  return { action: "created", issueNumber: created.data.number };
 }
 
 module.exports = {
