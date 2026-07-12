@@ -215,6 +215,8 @@ function applyLinuxTrayPatch(currentSource, iconPathExpression) {
     "trayMenuThreads={runningThreads:[],unreadThreads:[],pinnedThreads:[],recentThreads:[],usageLimits:[]};constructor(";
   const trayContextMethodPatch =
     `trayMenuThreads={runningThreads:[],unreadThreads:[],pinnedThreads:[],recentThreads:[],usageLimits:[]};setLinuxTrayContextMenu(){let e=${electronVar}.Menu.buildFromTemplate(this.getNativeTrayMenuItems());this.tray.setContextMenu?.(e);return e}constructor(`;
+  const trayRecoveryHelpers =
+    `let codexLinuxTrayController=null,codexLinuxTrayRecoveryRegistered=!1,codexLinuxTrayRecoveryHandler=()=>{let e=codexLinuxTrayController;e?.setLinuxTrayContextMenu?.()},codexLinuxStopTrayRecovery=()=>{codexLinuxTrayRecoveryRegistered&&(${electronVar}.powerMonitor.removeListener?.(\`unlock-screen\`,codexLinuxTrayRecoveryHandler),${electronVar}.powerMonitor.removeListener?.(\`resume\`,codexLinuxTrayRecoveryHandler),${electronVar}.app.removeListener?.(\`will-quit\`,codexLinuxTrayQuitHandler),codexLinuxTrayRecoveryRegistered=!1),codexLinuxTrayController=null},codexLinuxTrayQuitHandler=()=>{codexLinuxStopTrayRecovery()},codexLinuxStartTrayRecovery=()=>{codexLinuxTrayRecoveryRegistered||(${electronVar}.powerMonitor.on(\`unlock-screen\`,codexLinuxTrayRecoveryHandler),${electronVar}.powerMonitor.on(\`resume\`,codexLinuxTrayRecoveryHandler),${electronVar}.app.once(\`will-quit\`,codexLinuxTrayQuitHandler),codexLinuxTrayRecoveryRegistered=!0)},codexLinuxSetTrayController=e=>(codexLinuxTrayController=e,codexLinuxStartTrayRecovery(),e);`;
   if (patchedSource.includes("setLinuxTrayContextMenu(){")) {
     patchedSource = patchedSource.replace(
       /setLinuxTrayContextMenu\(\)\{let e=[A-Za-z_$][\w$]*\.Menu\.buildFromTemplate\(this\.getNativeTrayMenuItems\(\)\);/,
@@ -226,14 +228,26 @@ function applyLinuxTrayPatch(currentSource, iconPathExpression) {
     console.warn("WARN: Could not find tray controller fields — skipping Linux tray context menu method patch");
   }
 
+  const canSetLinuxTrayContextMenu = patchedSource.includes("setLinuxTrayContextMenu(){");
+  if (!patchedSource.includes("codexLinuxTrayRecoveryHandler=")) {
+    const trayControllerClassMatch = patchedSource.match(
+      new RegExp(`var [A-Za-z_$][\\w$]*=class\\{${escapeRegExp(trayContextMethodNeedle.split("constructor(")[0])}`),
+    );
+    if (trayControllerClassMatch != null && trayControllerClassMatch.index != null) {
+      patchedSource =
+        `${patchedSource.slice(0, trayControllerClassMatch.index)}${trayRecoveryHelpers}${patchedSource.slice(trayControllerClassMatch.index)}`;
+    } else if (patchedSource.includes(trayContextMethodNeedle)) {
+      console.warn("WARN: Could not find tray controller class — skipping Linux tray power-monitor refresh patch");
+    }
+  }
+
   const trayClickNeedle =
     "this.tray.on(`click`,()=>{this.onTrayButtonClick()}),this.tray.on(`right-click`,()=>{this.openNativeTrayMenu()})}";
   const trayClickPatchWithoutContextSetup =
     "this.tray.on(`click`,()=>{process.platform===`linux`?this.openNativeTrayMenu():this.onTrayButtonClick()}),this.tray.on(`right-click`,()=>{this.openNativeTrayMenu()})}";
   const trayClickPatch =
-    "process.platform===`linux`&&this.setLinuxTrayContextMenu(),this.tray.on(`click`,()=>{process.platform===`linux`?this.openNativeTrayMenu():this.onTrayButtonClick()}),this.tray.on(`right-click`,()=>{this.openNativeTrayMenu()})}";
-  const canSetLinuxTrayContextMenu = patchedSource.includes("setLinuxTrayContextMenu(){");
-  if (patchedSource.includes("process.platform===`linux`&&this.setLinuxTrayContextMenu(),this.tray.on(`click`")) {
+    "process.platform===`linux`&&(codexLinuxSetTrayController(this),this.setLinuxTrayContextMenu()),this.tray.on(`click`,()=>{process.platform===`linux`?this.openNativeTrayMenu():this.onTrayButtonClick()}),this.tray.on(`right-click`,()=>{this.openNativeTrayMenu()})}";
+  if (patchedSource.includes("process.platform===`linux`&&(codexLinuxSetTrayController(this),this.setLinuxTrayContextMenu()),this.tray.on(`click`")) {
     // Already patched.
   } else if (patchedSource.includes(trayClickNeedle)) {
     patchedSource = patchedSource.replace(
