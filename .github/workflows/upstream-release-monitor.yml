@@ -1,0 +1,471 @@
+name: Monitor Upstream Releases
+
+on:
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/upstream-preview-build.yml
+      - .github/workflows/upstream-release-monitor.yml
+      - scripts/ci/upstream-release-monitor.js
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Build one open upstream PR number (optional)
+        required: false
+        type: string
+      force_preview:
+        description: Replace the preview for the selected PR and exact head SHA
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-release-monitor
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  UPSTREAM_REPOSITORY: ilysenko/codex-desktop-linux
+  UPSTREAM_DMG_URL: https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg
+  UPSTREAM_DMG_PATH: /tmp/codex-upstream-ci/Codex.dmg
+  DMG_CACHE_SCHEMA_VERSION: v1
+  PREVIEW_LIMIT: 4
+
+jobs:
+  discover:
+    name: Discover upstream changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      preview_matrix: ${{ steps.discovery.outputs.preview_matrix }}
+      preview_count: ${{ steps.discovery.outputs.preview_count }}
+      stable_needed: ${{ steps.discovery.outputs.stable_needed }}
+      stable_tag: ${{ steps.discovery.outputs.stable_tag }}
+      sync_needed: ${{ steps.git.outputs.sync_needed }}
+      base_sha: ${{ steps.discovery.outputs.release_base_sha }}
+      upstream_head: ${{ steps.git.outputs.upstream_head }}
+      upstream_committed_at: ${{ steps.git.outputs.upstream_committed_at }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Capture fork and upstream Git state
+        id: git
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          git fetch --no-tags upstream main
+          upstream_head="$(git rev-parse upstream/main)"
+          base_sha="$(git merge-base HEAD upstream/main)"
+          upstream_committed_at="$(git show -s --format=%cI upstream/main)"
+          sync_needed=false
+          if ! git merge-base --is-ancestor "$upstream_head" HEAD; then
+            sync_needed=true
+          fi
+          {
+            echo "upstream_head=$upstream_head"
+            echo "base_sha=$base_sha"
+            echo "upstream_committed_at=$upstream_committed_at"
+            echo "sync_needed=$sync_needed"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Select unseen PR heads and stable target
+        id: discovery
+        uses: actions/github-script@v7
+        env:
+          BASE_SHA: ${{ steps.git.outputs.base_sha }}
+          UPSTREAM_HEAD: ${{ steps.git.outputs.upstream_head }}
+          UPSTREAM_COMMITTED_AT: ${{ steps.git.outputs.upstream_committed_at }}
+          REQUESTED_PR: ${{ inputs.pr_number || '' }}
+          FORCE_PREVIEW: ${{ inputs.force_preview || false }}
+        with:
+          script: |
+            const monitor = require('./scripts/ci/upstream-release-monitor.js');
+            const [owner, repo] = process.env.UPSTREAM_REPOSITORY.split('/');
+            const pulls = await monitor.listOpenPulls(github, { owner, repo });
+            const releases = await monitor.listReleases(github, context.repo);
+            const previews = monitor.selectPreviewCandidates({
+              pulls,
+              releases,
+              limit: Number(process.env.PREVIEW_LIMIT),
+              requestedPrNumber: process.env.REQUESTED_PR || null,
+              force: process.env.FORCE_PREVIEW === 'true',
+            });
+            const tag = monitor.stableTag(
+              process.env.UPSTREAM_COMMITTED_AT,
+              process.env.UPSTREAM_HEAD,
+            );
+            const stableRelease = releases.find((release) => release.tag_name === tag);
+            const releaseBaseSha = monitor.latestStableUpstreamSha(releases) ?? process.env.BASE_SHA;
+            core.setOutput('preview_matrix', JSON.stringify({ include: previews }));
+            core.setOutput('preview_count', String(previews.length));
+            core.setOutput('stable_tag', tag);
+            core.setOutput('stable_needed', String(!stableRelease));
+            core.setOutput('release_base_sha', releaseBaseSha);
+            await core.summary
+              .addHeading('Upstream release discovery')
+              .addList([
+                'Open upstream PRs: ' + pulls.length,
+                'Preview builds selected: ' + previews.length,
+                'Upstream main: ' + process.env.UPSTREAM_HEAD,
+                'Stable tag: ' + tag,
+                'Release-note base: ' + releaseBaseSha,
+                'Stable release needed: ' + !stableRelease,
+              ])
+              .write();
+
+  preview-builds:
+    name: "Preview PR #${{ matrix.prNumber }}"
+    needs: discover
+    if: needs.discover.outputs.preview_count != '0'
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJSON(needs.discover.outputs.preview_matrix) }}
+    permissions:
+      contents: write
+    uses: ./.github/workflows/upstream-preview-build.yml
+    with:
+      upstream_repository: ilysenko/codex-desktop-linux
+      pr_number: ${{ matrix.prNumber }}
+      base_sha: ${{ matrix.baseSha }}
+      head_sha: ${{ matrix.headSha }}
+      preview_tag: ${{ matrix.tag }}
+      force: ${{ inputs.force_preview || false }}
+
+  sync-stable:
+    name: Sync exact upstream stable target
+    needs: discover
+    if: needs.discover.outputs.stable_needed == 'true' || needs.discover.outputs.sync_needed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      fork_sha: ${{ steps.sync.outputs.fork_sha }}
+    env:
+      UPSTREAM_HEAD: ${{ needs.discover.outputs.upstream_head }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
+
+      - name: Merge and push upstream target without force
+        id: sync
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$UPSTREAM_HEAD" =~ ^[a-f0-9]{40}$ ]]
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          git fetch --no-tags upstream main
+          test "$(git rev-parse FETCH_HEAD)" = "$UPSTREAM_HEAD"
+          git fetch --no-tags origin main
+          git checkout -B main origin/main
+          expected_origin="$(git rev-parse origin/main)"
+          if ! git merge-base --is-ancestor "$UPSTREAM_HEAD" HEAD; then
+            git merge --no-edit "$UPSTREAM_HEAD"
+          fi
+          git fetch --no-tags origin main
+          test "$(git rev-parse origin/main)" = "$expected_origin"
+          if [ "$(git rev-parse HEAD)" != "$expected_origin" ]; then
+            git push origin HEAD:main
+          fi
+          echo "fork_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  stable-build:
+    name: Build stable Debian package in CI
+    needs:
+      - discover
+      - sync-stable
+    if: needs.discover.outputs.stable_needed == 'true' && needs.sync-stable.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      UPSTREAM_HEAD: ${{ needs.discover.outputs.upstream_head }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.sync-stable.outputs.fork_sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full make g++ python3 curl unzip
+
+      - name: Capture upstream DMG identity
+        id: dmg
+        shell: bash
+        run: |
+          set -euo pipefail
+          headers_file="$(mktemp)"
+          trap 'rm -f "$headers_file"' EXIT
+          curl -fsSLI --retry 3 "$UPSTREAM_DMG_URL" > "$headers_file"
+          last_modified="$(awk 'tolower($0) ~ /^last-modified:/ {sub(/\r$/,""); sub(/^[^:]+: /,""); print; exit}' "$headers_file")"
+          etag="$(awk 'tolower($0) ~ /^etag:/ {sub(/\r$/,""); sub(/^[^:]+: /,""); gsub(/"/,""); print; exit}' "$headers_file")"
+          content_length="$(awk 'tolower($0) ~ /^content-length:/ {sub(/\r$/,""); sub(/^[^:]+: /,""); print; exit}' "$headers_file")"
+          cache_segment="$(printf '%s|%s|%s\n' "$last_modified" "$etag" "$content_length" | sha256sum | cut -d' ' -f1)"
+          echo "cache_segment=$cache_segment" >> "$GITHUB_OUTPUT"
+
+      - name: Restore trusted upstream DMG cache
+        id: dmg-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/codex-upstream-ci/Codex.dmg
+          key: upstream-dmg-${{ env.DMG_CACHE_SCHEMA_VERSION }}-${{ steps.dmg.outputs.cache_segment }}
+
+      - name: Download upstream DMG on cache miss
+        if: steps.dmg-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$UPSTREAM_DMG_PATH")"
+          curl -fL --retry 5 --retry-all-errors -o "$UPSTREAM_DMG_PATH" "$UPSTREAM_DMG_URL"
+
+      - name: Choose stable package version
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          timestamp="$(date -u +%Y.%m.%d.%H%M%S)"
+          version="${timestamp}+${UPSTREAM_HEAD:0:8}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build stable package
+        env:
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          make build-app DMG="$UPSTREAM_DMG_PATH"
+          make deb PACKAGE_VERSION="$PACKAGE_VERSION"
+
+      - name: Stage bounded stable artifact
+        env:
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t packages < <(find dist -maxdepth 1 -type f -name 'codex-desktop_*.deb' -print)
+          test "${#packages[@]}" -eq 1
+          package="${packages[0]}"
+          test "$(dpkg-deb -f "$package" Package)" = "codex-desktop"
+          test "$(dpkg-deb -f "$package" Architecture)" = "amd64"
+          test "$(dpkg-deb -f "$package" Version)" = "$PACKAGE_VERSION"
+          size="$(stat -c '%s' "$package")"
+          test "$size" -ge 10000000
+          test "$size" -le 1073741824
+          mkdir -p /tmp/stable-package
+          cp -- "$package" /tmp/stable-package/package.deb
+          (cd /tmp/stable-package && sha256sum package.deb > package.deb.sha256)
+
+      - name: Upload stable package for trusted publication
+        uses: actions/upload-artifact@v4
+        with:
+          name: stable-${{ needs.discover.outputs.upstream_head }}
+          path: /tmp/stable-package/
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-stable:
+    name: Publish stable latest release
+    needs:
+      - discover
+      - sync-stable
+      - stable-build
+    if: needs.stable-build.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BASE_SHA: ${{ needs.discover.outputs.base_sha }}
+      UPSTREAM_HEAD: ${{ needs.discover.outputs.upstream_head }}
+      FORK_SHA: ${{ needs.sync-stable.outputs.fork_sha }}
+      STABLE_TAG: ${{ needs.discover.outputs.stable_tag }}
+      RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download stable artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: stable-${{ needs.discover.outputs.upstream_head }}
+          path: stable-package
+
+      - name: Validate package and choose stable asset name
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f stable-package/package.deb
+          test ! -L stable-package/package.deb
+          (cd stable-package && sha256sum -c package.deb.sha256)
+          test "$(dpkg-deb -f stable-package/package.deb Package)" = "codex-desktop"
+          test "$(dpkg-deb -f stable-package/package.deb Architecture)" = "amd64"
+          version="$(dpkg-deb -f stable-package/package.deb Version)"
+          expected_suffix="+${UPSTREAM_HEAD:0:8}"
+          [[ "$version" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]{6}\+[a-f0-9]{8}$ ]]
+          [[ "$version" == *"$expected_suffix" ]]
+          size="$(stat -c '%s' stable-package/package.deb)"
+          test "$size" -ge 10000000
+          test "$size" -le 1073741824
+          asset="codex-desktop_${version}_amd64.deb"
+          mv stable-package/package.deb "stable-package/$asset"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+
+      - name: Generate trusted stable release notes
+        uses: actions/github-script@v7
+        env:
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            const monitor = require('./scripts/ci/upstream-release-monitor.js');
+            const [owner, repo] = process.env.UPSTREAM_REPOSITORY.split('/');
+            const commits = process.env.BASE_SHA === process.env.UPSTREAM_HEAD
+              ? []
+              : await monitor.compareCommits(
+                  github,
+                  { owner, repo },
+                  process.env.BASE_SHA,
+                  process.env.UPSTREAM_HEAD,
+                );
+            const pullNumbers = monitor.pullNumbersFromCommits(commits);
+            const pulls = await monitor.loadPullsByNumber(github, { owner, repo }, pullNumbers);
+            const notes = monitor.formatStableNotes({
+              upstreamRepository: process.env.UPSTREAM_REPOSITORY,
+              baseSha: process.env.BASE_SHA,
+              headSha: process.env.UPSTREAM_HEAD,
+              forkSha: process.env.FORK_SHA,
+              pulls,
+              commits,
+              packageVersion: process.env.PACKAGE_VERSION,
+              runUrl: process.env.RUN_URL,
+            });
+            fs.writeFileSync('stable-release-notes.md', notes);
+
+      - name: Create stable latest release
+        id: publish
+        env:
+          ASSET_NAME: ${{ steps.package.outputs.asset }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$STABLE_TAG" >/dev/null 2>&1; then
+            echo "Stable release $STABLE_TAG already exists; leaving it unchanged."
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh release create "$STABLE_TAG" \
+            "stable-package/${ASSET_NAME}" \
+            --target "$FORK_SHA" \
+            --title "Codex Desktop Linux Stable (${UPSTREAM_HEAD:0:12})" \
+            --notes-file stable-release-notes.md \
+            --latest
+          echo "published=true" >> "$GITHUB_OUTPUT"
+
+  report:
+    name: Update upstream activity dashboard
+    needs:
+      - discover
+      - preview-builds
+      - sync-stable
+      - stable-build
+      - publish-stable
+    if: always() && needs.discover.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: read
+    env:
+      UPSTREAM_HEAD: ${{ needs.discover.outputs.upstream_head }}
+      STABLE_TAG: ${{ needs.discover.outputs.stable_tag }}
+      PREVIEW_COUNT: ${{ needs.discover.outputs.preview_count }}
+      PREVIEW_RESULT: ${{ needs.preview-builds.result }}
+      STABLE_RESULT: sync=${{ needs.sync-stable.result }}, build=${{ needs.stable-build.result }}, publish=${{ needs.publish-stable.result }}
+      RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Remove previews for PRs that are no longer open
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const monitor = require('./scripts/ci/upstream-release-monitor.js');
+            const [owner, repo] = process.env.UPSTREAM_REPOSITORY.split('/');
+            const pulls = await monitor.listOpenPulls(github, { owner, repo });
+            const releases = await monitor.listReleases(github, context.repo);
+            const stableRelease = releases.find((release) => release.tag_name === process.env.STABLE_TAG);
+            if (!stableRelease) {
+              core.notice('Current stable release is not available; preserving closed-PR previews.');
+              return;
+            }
+            const staleTags = monitor.staleClosedPreviewTags({ releases, openPulls: pulls });
+            for (const tag of staleTags) {
+              const release = releases.find((item) => item.tag_name === tag);
+              if (release) await github.rest.repos.deleteRelease({ ...context.repo, release_id: release.id });
+              try {
+                await github.rest.git.deleteRef({ ...context.repo, ref: 'tags/' + tag });
+              } catch (error) {
+                if (error.status !== 404 && error.status !== 422) throw error;
+              }
+            }
+
+      - name: Create or update owned monitor issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const monitor = require('./scripts/ci/upstream-release-monitor.js');
+            const [owner, repo] = process.env.UPSTREAM_REPOSITORY.split('/');
+            const pulls = await monitor.listOpenPulls(github, { owner, repo });
+            const releases = await monitor.listReleases(github, context.repo);
+            const stableRelease = releases.find((release) => release.tag_name === process.env.STABLE_TAG) ?? null;
+            const result = await monitor.reconcileMonitorIssue({
+              github,
+              repo: context.repo,
+              snapshot: {
+                upstreamRepository: process.env.UPSTREAM_REPOSITORY,
+                upstreamHeadSha: process.env.UPSTREAM_HEAD,
+                stableRelease,
+                pulls,
+                releases,
+                queuedCount: Number(process.env.PREVIEW_COUNT),
+                runUrl: process.env.RUN_URL,
+                stableResult: process.env.STABLE_RESULT,
+                previewResult: process.env.PREVIEW_RESULT,
+              },
+            });
+            core.notice('Monitor issue action: ' + result.action);

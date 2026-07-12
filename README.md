@@ -356,6 +356,7 @@ Full list: [Troubleshooting](docs/troubleshooting.md).
 - [Record and Replay on Linux](docs/record-and-replay-linux.md)
 - [Updater](docs/updater.md)
 - [Build and packaging](docs/build-and-packaging.md)
+- [Upstream preview and stable releases](docs/upstream-release-monitor.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Architecture](docs/architecture.md)
 - [GitHub CLI auth in app-launched shells](docs/github-cli-auth.md)

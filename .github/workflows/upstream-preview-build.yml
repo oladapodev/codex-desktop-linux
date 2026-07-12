@@ -1,0 +1,348 @@
+name: Build Upstream PR Preview
+
+on:
+  workflow_call:
+    inputs:
+      upstream_repository:
+        description: Upstream owner and repository
+        required: true
+        type: string
+      pr_number:
+        description: Upstream pull request number
+        required: true
+        type: number
+      base_sha:
+        description: Exact upstream pull request base SHA
+        required: true
+        type: string
+      head_sha:
+        description: Exact upstream pull request head SHA
+        required: true
+        type: string
+      preview_tag:
+        description: Deterministic preview release tag
+        required: true
+        type: string
+      force:
+        description: Replace an existing release for this exact tag
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: upstream-preview-pr-${{ inputs.pr_number }}
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  UPSTREAM_DMG_URL: https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg
+  UPSTREAM_DMG_PATH: /tmp/codex-upstream-ci/Codex.dmg
+  DMG_CACHE_SCHEMA_VERSION: v1
+
+jobs:
+  build-preview:
+    name: "Build PR #${{ inputs.pr_number }} without credentials"
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      UPSTREAM_REPOSITORY: ${{ inputs.upstream_repository }}
+      PR_NUMBER: ${{ inputs.pr_number }}
+      BASE_SHA: ${{ inputs.base_sha }}
+      HEAD_SHA: ${{ inputs.head_sha }}
+      PREVIEW_TAG: ${{ inputs.preview_tag }}
+
+    steps:
+      - name: Validate trusted workflow inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$UPSTREAM_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          [[ "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
+          expected_tag="preview-pr-${PR_NUMBER}-${HEAD_SHA:0:12}"
+          test "$PREVIEW_TAG" = "$expected_tag"
+
+      - name: Fetch exact public PR head without credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir source
+          git -C source init
+          git -C source remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          git -C source fetch --depth=1 upstream "refs/pull/${PR_NUMBER}/head"
+          actual_sha="$(git -C source rev-parse FETCH_HEAD)"
+          test "$actual_sha" = "$HEAD_SHA"
+          git -C source checkout --detach "$actual_sha"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full make g++ python3 curl unzip
+
+      - name: Capture upstream DMG identity
+        id: dmg
+        shell: bash
+        run: |
+          set -euo pipefail
+          headers_file="$(mktemp)"
+          trap 'rm -f "$headers_file"' EXIT
+          curl -fsSLI --retry 3 "$UPSTREAM_DMG_URL" > "$headers_file"
+          last_modified="$(awk 'tolower($0) ~ /^last-modified:/ {sub(/\r$/,""); sub(/^[^:]+: /,""); print; exit}' "$headers_file")"
+          etag="$(awk 'tolower($0) ~ /^etag:/ {sub(/\r$/,""); sub(/^[^:]+: /,""); gsub(/"/,""); print; exit}' "$headers_file")"
+          content_length="$(awk 'tolower($0) ~ /^content-length:/ {sub(/\r$/,""); sub(/^[^:]+: /,""); print; exit}' "$headers_file")"
+          cache_segment="$(printf '%s|%s|%s\n' "$last_modified" "$etag" "$content_length" | sha256sum | cut -d' ' -f1)"
+          echo "cache_segment=$cache_segment" >> "$GITHUB_OUTPUT"
+
+      - name: Restore trusted upstream DMG cache
+        id: dmg-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/codex-upstream-ci/Codex.dmg
+          key: upstream-dmg-${{ env.DMG_CACHE_SCHEMA_VERSION }}-${{ steps.dmg.outputs.cache_segment }}
+
+      - name: Download upstream DMG on cache miss
+        if: steps.dmg-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$UPSTREAM_DMG_PATH")"
+          curl -fL --retry 5 --retry-all-errors -o "$UPSTREAM_DMG_PATH" "$UPSTREAM_DMG_URL"
+
+      - name: Choose preview package version
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          timestamp="$(date -u +%Y.%m.%d.%H%M%S)"
+          version="${timestamp}~preview.pr${PR_NUMBER}.${HEAD_SHA:0:8}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build unmerged preview package
+        working-directory: source
+        env:
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          make build-app DMG="$UPSTREAM_DMG_PATH"
+          make deb PACKAGE_VERSION="$PACKAGE_VERSION"
+
+      - name: Stage bounded Debian artifact
+        working-directory: source
+        env:
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t packages < <(find dist -maxdepth 1 -type f -name 'codex-desktop_*.deb' -print)
+          test "${#packages[@]}" -eq 1
+          package="${packages[0]}"
+          test "$(dpkg-deb -f "$package" Package)" = "codex-desktop"
+          test "$(dpkg-deb -f "$package" Architecture)" = "amd64"
+          test "$(dpkg-deb -f "$package" Version)" = "$PACKAGE_VERSION"
+          size="$(stat -c '%s' "$package")"
+          test "$size" -ge 10000000
+          test "$size" -le 1073741824
+          mkdir -p /tmp/preview-package
+          cp -- "$package" /tmp/preview-package/package.deb
+          (cd /tmp/preview-package && sha256sum package.deb > package.deb.sha256)
+
+      - name: Upload preview package for trusted publication
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-pr-${{ inputs.pr_number }}-${{ inputs.head_sha }}
+          path: /tmp/preview-package/
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-preview:
+    name: "Publish PR #${{ inputs.pr_number }} prerelease"
+    needs: build-preview
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      UPSTREAM_REPOSITORY: ${{ inputs.upstream_repository }}
+      PR_NUMBER: ${{ inputs.pr_number }}
+      BASE_SHA: ${{ inputs.base_sha }}
+      HEAD_SHA: ${{ inputs.head_sha }}
+      PREVIEW_TAG: ${{ inputs.preview_tag }}
+      FORCE_PREVIEW: ${{ inputs.force }}
+      RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download isolated preview artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: preview-pr-${{ inputs.pr_number }}-${{ inputs.head_sha }}
+          path: preview-package
+
+      - name: Validate package and choose asset name
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f preview-package/package.deb
+          test ! -L preview-package/package.deb
+          (cd preview-package && sha256sum -c package.deb.sha256)
+          test "$(dpkg-deb -f preview-package/package.deb Package)" = "codex-desktop"
+          test "$(dpkg-deb -f preview-package/package.deb Architecture)" = "amd64"
+          version="$(dpkg-deb -f preview-package/package.deb Version)"
+          expected_suffix="~preview.pr${PR_NUMBER}.${HEAD_SHA:0:8}"
+          [[ "$version" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]{6}~preview\.pr[1-9][0-9]*\.[a-f0-9]{8}$ ]]
+          [[ "$version" == *"$expected_suffix" ]]
+          size="$(stat -c '%s' preview-package/package.deb)"
+          test "$size" -ge 10000000
+          test "$size" -le 1073741824
+          asset="codex-desktop_${version}_amd64.deb"
+          mv preview-package/package.deb "preview-package/$asset"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+
+      - name: Generate trusted preview release notes
+        uses: actions/github-script@v7
+        env:
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            const monitor = require('./scripts/ci/upstream-release-monitor.js');
+            const [owner, repo] = process.env.UPSTREAM_REPOSITORY.split('/');
+            const response = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: Number(process.env.PR_NUMBER),
+            });
+            const pull = { ...response.data, head: { ...response.data.head, sha: process.env.HEAD_SHA } };
+            const commits = await monitor.compareCommits(
+              github,
+              { owner, repo },
+              process.env.BASE_SHA,
+              process.env.HEAD_SHA,
+            );
+            const notes = monitor.formatPreviewNotes({
+              upstreamRepository: process.env.UPSTREAM_REPOSITORY,
+              pull,
+              commits,
+              packageVersion: process.env.PACKAGE_VERSION,
+              runUrl: process.env.RUN_URL,
+            });
+            fs.writeFileSync('preview-release-notes.md', notes);
+
+      - name: Create or replace preview prerelease
+        id: publish
+        env:
+          ASSET_NAME: ${{ steps.package.outputs.asset }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$PREVIEW_TAG" >/dev/null 2>&1; then
+            if [ "$FORCE_PREVIEW" != "true" ]; then
+              echo "Release $PREVIEW_TAG already exists; leaving it unchanged."
+              echo "published=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            gh release delete "$PREVIEW_TAG" --cleanup-tag --yes
+          fi
+          gh release create "$PREVIEW_TAG" \
+            "preview-package/${ASSET_NAME}" \
+            --target "$GITHUB_SHA" \
+            --title "[PREVIEW] Upstream PR #${PR_NUMBER} (${HEAD_SHA:0:12})" \
+            --notes-file preview-release-notes.md \
+            --prerelease
+          echo "published=true" >> "$GITHUB_OUTPUT"
+
+      - name: Retain only the newest successful preview for this PR
+        if: steps.publish.outputs.published == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const monitor = require('./scripts/ci/upstream-release-monitor.js');
+            const releases = await monitor.listReleases(github, context.repo);
+            const staleTags = monitor.previewTagsToDelete({
+              releases,
+              prNumber: Number(process.env.PR_NUMBER),
+              keepTag: process.env.PREVIEW_TAG,
+            });
+            for (const tag of staleTags) {
+              const release = releases.find((item) => item.tag_name === tag);
+              if (release) await github.rest.repos.deleteRelease({ ...context.repo, release_id: release.id });
+              try {
+                await github.rest.git.deleteRef({ ...context.repo, ref: `tags/${tag}` });
+              } catch (error) {
+                if (error.status !== 404 && error.status !== 422) throw error;
+              }
+            }
+
+  record-preview-failure:
+    name: "Record PR #${{ inputs.pr_number }} preview failure"
+    needs: build-preview
+    if: always() && needs.build-preview.result == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      PR_NUMBER: ${{ inputs.pr_number }}
+      HEAD_SHA: ${{ inputs.head_sha }}
+      PREVIEW_TAG: ${{ inputs.preview_tag }}
+      RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+    steps:
+      - name: Create an asset-free failed preview marker
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = [
+              `<!-- upstream-preview-failed:${process.env.PR_NUMBER}:${process.env.HEAD_SHA} -->`,
+              '**Preview build failed. No package asset was published.**',
+              '',
+              `- Upstream PR: #${process.env.PR_NUMBER}`,
+              `- Head SHA: \`${process.env.HEAD_SHA}\``,
+              `- Workflow run: [open failed run](${process.env.RUN_URL})`,
+              '',
+              'Use manual workflow dispatch with `force_preview` after fixing or investigating the failure.',
+            ].join('\n');
+            try {
+              const existing = await github.rest.repos.getReleaseByTag({
+                ...context.repo,
+                tag: process.env.PREVIEW_TAG,
+              });
+              if (existing.data.assets.length > 0) {
+                core.notice('A successful release already exists for this SHA; preserving it.');
+                return;
+              }
+              await github.rest.repos.updateRelease({
+                ...context.repo,
+                release_id: existing.data.id,
+                name: `[FAILED PREVIEW] Upstream PR #${process.env.PR_NUMBER}`,
+                body,
+                prerelease: true,
+              });
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              await github.rest.repos.createRelease({
+                ...context.repo,
+                tag_name: process.env.PREVIEW_TAG,
+                target_commitish: context.sha,
+                name: `[FAILED PREVIEW] Upstream PR #${process.env.PR_NUMBER}`,
+                body,
+                prerelease: true,
+              });
+            }
