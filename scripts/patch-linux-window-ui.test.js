@@ -940,6 +940,7 @@ test("default core patch descriptors are grouped and unique", () => {
     "linux-bundled-plugin-copy-permissions",
     "linux-browser-use-route-liveness",
     "linux-chrome-extension-status",
+    "linux-notification-actions",
     "linux-local-app-server-feature-enablement-handler",
     "linux-remote-control-config-preservation",
     "linux-app-updater-menu",
@@ -1181,7 +1182,7 @@ function trayBundleFixture() {
     "async function Hw(e){return process.platform!==`win32`&&process.platform!==`darwin`?null:(zw=!0,Lw??Rw??(Rw=(async()=>{let r=await Ww(e.buildFlavor,e.appBrand,e.repoRoot),i=new n.Tray(r.defaultIcon);return i})()))}",
     "async function Ww(e,t,i){if(process.platform===`darwin`){return null}let r=K9(e,t,i);return r==null?{defaultIcon:await n.app.getFileIcon(process.execPath,{size:`small`}),chronicleRunningIcon:null}:{defaultIcon:r,chronicleRunningIcon:null}}",
     "function K9(e,t,r){let a=[(0,i.join)(r,`electron`,`src`,`icons`,`tray.png`)];for(let e of a){let t=n.nativeImage.createFromPath(e);if(!t.isEmpty())return t}return null}",
-    "var pb=class{trayMenuThreads={runningThreads:[],unreadThreads:[],pinnedThreads:[],recentThreads:[],usageLimits:[]};constructor(){this.tray={on(){},setContextMenu(){},popUpContextMenu(){}};this.onTrayButtonClick=()=>{};this.tray.on(`click`,()=>{this.onTrayButtonClick()}),this.tray.on(`right-click`,()=>{this.openNativeTrayMenu()})}async handleMessage(e){switch(e.type){case`tray-menu-threads-changed`:this.trayMenuThreads=e.trayMenuThreads;return}}openNativeTrayMenu(){this.updateChronicleTrayIcon();let e=n.Menu.buildFromTemplate(this.getNativeTrayMenuItems());e.once(`menu-will-show`,()=>{this.isNativeTrayMenuOpen=!0}),e.once(`menu-will-close`,()=>{this.isNativeTrayMenuOpen=!1,this.handleNativeTrayMenuClosed()}),this.tray.popUpContextMenu(e)}updateChronicleTrayIcon(){}getNativeTrayMenuItems(){return[]}}",
+    "var pb=class{nativeTrayClickSuppressionReason=null;clearNativeTrayClickSuppressionTimeout=null;chronicleTrayIconRefreshInterval=null;chronicleTrayIconState=`default`;isNativeTrayMenuOpen=!1;trayMenuThreads={runningThreads:[],unreadThreads:[],pinnedThreads:[],recentThreads:[],usageLimits:[]};constructor(){this.tray={on(){},setContextMenu(){},popUpContextMenu(){}};this.onTrayButtonClick=()=>{};this.tray.on(`click`,()=>{this.onTrayButtonClick()}),this.tray.on(`right-click`,()=>{this.openNativeTrayMenu()})}async handleMessage(e){switch(e.type){case`tray-menu-threads-changed`:this.trayMenuThreads=e.trayMenuThreads;return}}openNativeTrayMenu(){this.updateChronicleTrayIcon();let e=n.Menu.buildFromTemplate(this.getNativeTrayMenuItems());e.once(`menu-will-show`,()=>{this.isNativeTrayMenuOpen=!0}),e.once(`menu-will-close`,()=>{this.isNativeTrayMenuOpen=!1,this.handleNativeTrayMenuClosed()}),this.tray.popUpContextMenu(e)}updateChronicleTrayIcon(){}getNativeTrayMenuItems(){return[]}}",
     "v&&k.on(`close`,e=>{this.persistPrimaryWindowBounds(k);let t=this.getPrimaryWindows().some(e=>e!==k);if(process.platform===`win32`&&!this.isAppQuitting&&this.options.canHideLastWindowToTray?.()===!0&&!t){e.preventDefault(),k.hide();return}if(process.platform===`darwin`&&!this.isAppQuitting&&!t){e.preventDefault(),k.hide()}});",
     "let oe=async()=>{O=!0;try{await Hw({appBrand:a.U(),buildFlavor:b,repoRoot:j.repoRoot})}catch(e){O=!1,v.reportNonFatal(e instanceof Error?e:`Failed to set up tray`,{kind:`tray-setup-failed`,tags:{errorType:`tray-setup-failed`}}),N.ensureWindow()}};E&&oe();",
   ].join("");
@@ -3630,7 +3631,11 @@ test("adds Linux tray support including the platform guard", () => {
   assert.match(patched, /setLinuxTrayContextMenu\(\)\{let e=n\.Menu\.buildFromTemplate/);
   assert.match(
     patched,
-    /process\.platform===`linux`&&this\.setLinuxTrayContextMenu\(\),this\.tray\.on\(`click`/,
+    /process\.platform===`linux`&&\(codexLinuxSetTrayController\(this\),this\.setLinuxTrayContextMenu\(\)\),this\.tray\.on\(`click`/,
+  );
+  assert.match(
+    patched,
+    /codexLinuxTrayRecoveryHandler=\(\)=>\{let e=codexLinuxTrayController;e\?\.setLinuxTrayContextMenu\?\.\(\)\}/,
   );
   assert.match(
     patched,
@@ -3646,6 +3651,111 @@ test("adds Linux tray support including the platform guard", () => {
     /\(E\|\|process\.platform===`linux`&&\(typeof codexLinuxIsTrayEnabled!==`function`\|\|codexLinuxIsTrayEnabled\(\)\)\)&&oe\(\);/,
   );
   assert.doesNotMatch(patched, /process\.platform===`linux`&&codexLinuxIsTrayEnabled\(\)/);
+});
+
+test("refreshes only the live Linux tray controller after session recovery", () => {
+  const source = `${mainBundlePrefix}${trayBundleFixture()
+    .replace(
+      "this.tray={on(){},setContextMenu(){},popUpContextMenu(){}}",
+      "this.tray=globalThis.createTray()",
+    )
+    .replace("}}v&&", "}};v&&")
+    .replace(";E&&oe();", ";")}`;
+  const patched = applyPatchTwice(applyLinuxTrayPatch, source, null);
+  const powerMonitor = new EventEmitter();
+  const app = new EventEmitter();
+  const trays = [];
+  const context = {
+    E: false,
+    v: false,
+    e: { o: (value) => value },
+    process: { platform: "linux", resourcesPath: "", execPath: "" },
+    require: (name) => {
+      if (name !== "electron") {
+        return {};
+      }
+      return {
+        app,
+        powerMonitor,
+        Menu: { buildFromTemplate: () => ({}) },
+      };
+    },
+    createTray: () => {
+      const tray = {
+        destroyed: false,
+        menuSetCount: 0,
+        on() {},
+        setContextMenu() {
+          if (this.destroyed) {
+            throw new Error("destroyed tray");
+          }
+          this.menuSetCount += 1;
+        },
+        popUpContextMenu() {},
+        destroy() {
+          this.destroyed = true;
+        },
+      };
+      trays.push(tray);
+      return tray;
+    },
+  };
+
+  vm.runInNewContext(`${patched};globalThis.TrayController=pb;`, context);
+  assert.equal(powerMonitor.listenerCount("unlock-screen"), 0);
+  assert.equal(powerMonitor.listenerCount("resume"), 0);
+  const firstController = new context.TrayController();
+  assert.equal(powerMonitor.listenerCount("unlock-screen"), 1);
+  assert.equal(powerMonitor.listenerCount("resume"), 1);
+  const firstTray = trays[0];
+  firstTray.destroy();
+  const liveController = new context.TrayController();
+  const liveTray = trays[1];
+
+  assert.doesNotThrow(() => {
+    powerMonitor.emit("unlock-screen");
+    powerMonitor.emit("resume");
+  });
+  assert.equal(firstTray.menuSetCount, 1);
+  assert.equal(liveTray.menuSetCount, 3);
+
+  app.emit("before-quit");
+  powerMonitor.emit("unlock-screen");
+  assert.equal(liveTray.menuSetCount, 4);
+  assert.equal(powerMonitor.listenerCount("unlock-screen"), 1);
+  assert.equal(powerMonitor.listenerCount("resume"), 1);
+
+  app.emit("will-quit");
+  powerMonitor.emit("unlock-screen");
+  assert.equal(liveTray.menuSetCount, 4);
+  assert.equal(powerMonitor.listenerCount("unlock-screen"), 0);
+  assert.equal(powerMonitor.listenerCount("resume"), 0);
+  assert.ok(firstController);
+  assert.ok(liveController);
+});
+
+test("keeps Linux tray setup fail-soft when recovery helper insertion drifts", () => {
+  const source = `${mainBundlePrefix}${trayBundleFixture().replace(
+    "var pb=class{nativeTrayClickSuppressionReason=",
+    "var pb=class extends globalThis.TrayBase{nativeTrayClickSuppressionReason=",
+  )}`;
+
+  const { value: patched, warnings } = captureWarns(() =>
+    applyPatchTwice(applyLinuxTrayPatch, source, null),
+  );
+
+  assert.ok(
+    warnings.includes(
+      "WARN: Could not find tray controller class — skipping Linux tray power-monitor refresh patch",
+    ),
+  );
+  assert.match(patched, /setLinuxTrayContextMenu\(\)\{/);
+  assert.match(
+    patched,
+    /process\.platform===`linux`&&this\.setLinuxTrayContextMenu\(\),this\.tray\.on\(`click`/,
+  );
+  assert.doesNotMatch(patched, /codexLinuxSetTrayController\(this\)/);
+  assert.doesNotMatch(patched, /codexLinuxTrayRecoveryHandler=/);
 });
 
 test("uses collision-proof Linux tray icon variables when Electron alias is r", () => {
