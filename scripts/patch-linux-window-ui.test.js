@@ -1470,48 +1470,6 @@ function linuxDesktopNavigationBundleFixture() {
   ].join("");
 }
 
-function createNativeKeyboardShortcutsSettingsFixture() {
-  const extractedDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-native-shortcuts-"));
-  const assetsDir = path.join(extractedDir, "webview", "assets");
-  fs.mkdirSync(assetsDir, { recursive: true });
-
-  const writeAsset = (name, source = "") => {
-    fs.writeFileSync(path.join(assetsDir, name), source, "utf8");
-  };
-
-  writeAsset("chunk-A.js", "");
-  writeAsset(
-    "jsx-runtime-A.js",
-    'import{s as s}from"./chunk-A.js";function n(){return{}}function t(){return{jsx(){},jsxs(){},Fragment:"Fragment"}}react.transitional.element;export{n,t};',
-  );
-  writeAsset(
-    "shared-app-A.js",
-    'function requestCodex(...args){let[method,request]=args,{params:params,select:select,signal:signal,source:source}=request??{};return rawCodex(method,params,select,signal,source)}async function rawCodex(method,params,select,signal,source){let result=(await transport.post(`vscode://codex/${method}`,JSON.stringify(params),headers(source),signal)).body;return select?select(result):result}export{requestCodex as z};',
-  );
-  writeAsset("general-settings-A.js", "hotkey-window-hotkey-state");
-  writeAsset(
-    "toggle-A.js",
-    'function t({checked,disabled,onChange,ariaLabel}){return {role:"switch","aria-checked":checked,"aria-label":ariaLabel,disabled,onClick:()=>onChange(!checked)}}export{t};',
-  );
-  writeAsset(
-    "settings-row-A.js",
-    "function a(e){let{label:t,description:n,control:r}=e;return null}function s(e){let{label:t,children:n}=e;return null}export{s as n,a as r};",
-  );
-  writeAsset("settings-content-layout-A.js", "export{n,r,t};");
-  writeAsset("settings-group-A.js", "export{n,t};");
-  writeAsset("settings-surface-A.js", "export{t};");
-  writeAsset(
-    "settings-sections-A.js",
-    "var e=`general-settings`,t=`mcp-settings`,n=[{slug:e},{slug:`appearance`},{slug:`keyboard-shortcuts`}];",
-  );
-  writeAsset("settings-shared-A.js", settingsSharedBundleFixture());
-  writeAsset("app-main-A.js", linuxDesktopRouteBundleFixture());
-  writeAsset("settings-page-A.js", linuxDesktopNavigationBundleFixture());
-  writeAsset("keyboard-shortcuts-settings-A.js", "export default function KeyboardShortcutsSettings(){}");
-
-  return { extractedDir, assetsDir };
-}
-
 function createModernNativeKeyboardShortcutsSettingsFixture() {
   const extractedDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-modern-native-shortcuts-"));
   const assetsDir = path.join(extractedDir, "webview", "assets");
@@ -5023,92 +4981,6 @@ test("fails loudly when current Codex request API asset detection is ambiguous",
   }
 });
 
-test("keeps Linux desktop toggles visible with native Keyboard Shortcuts", () => {
-  const { extractedDir, assetsDir } = createNativeKeyboardShortcutsSettingsFixture();
-  try {
-    const result = patchKeybindsSettingsAssets(extractedDir);
-
-    assert.equal(result.matched, true);
-    assert.ok(result.changed >= 4);
-    assert.match(result.reason, /upstream keyboard shortcuts settings are present/);
-    assert.equal(fs.existsSync(path.join(assetsDir, keybindsSettingsAsset)), false);
-    assert.equal(fs.existsSync(path.join(assetsDir, linuxDesktopSettingsAsset)), true);
-
-    const linuxDesktopSource = fs.readFileSync(
-      path.join(assetsDir, linuxDesktopSettingsAsset),
-      "utf8",
-    );
-    assert.match(linuxDesktopSource, /Linux desktop/);
-    assert.match(linuxDesktopSource, /Compact prompt window/);
-    assert.match(linuxDesktopSource, /System tray/);
-    assert.match(linuxDesktopSource, /Warm start/);
-    assert.match(linuxDesktopSource, /Install updates when you close ChatGPT/);
-    assert.match(linuxDesktopSource, /Build information/);
-    assert.match(linuxDesktopSource, /Linux source commit/);
-    assert.match(linuxDesktopSource, /Copy commit/);
-    assert.match(linuxDesktopSource, /Open on GitHub/);
-    assert.match(linuxDesktopSource, /"Linux source commit":\[\{key:"copyCommit"/);
-    assert.match(linuxDesktopSource, /"Generated":\[\{key:"refresh"/);
-    assert.match(linuxDesktopSource, /"Metadata file":\[\{key:"details"/);
-    assert.match(linuxDesktopSource, /control:null/);
-    assert.match(linuxDesktopSource, /cursor-pointer/);
-    assert.match(linuxDesktopSource, /disabled:cursor-not-allowed/);
-    assert.doesNotMatch(
-      linuxDesktopSource,
-      /control:\$\.jsxs\("div",\{className:"flex flex-wrap items-center justify-end gap-2"/,
-    );
-    assert.doesNotMatch(linuxDesktopSource, /Source commit URL/);
-    assert.match(linuxDesktopSource, /href:url/);
-    assert.match(linuxDesktopSource, /codex-linux-get-build-info/);
-    assert.match(linuxDesktopSource, /codex-linux-system-tray-enabled/);
-    assert.match(linuxDesktopSource, /codex-linux-auto-update-on-exit/);
-    assert.match(linuxDesktopSource, /import\{r as SettingsRow\}from"\.\/settings-row-A\.js"/);
-    assert.match(linuxDesktopSource, /import\{z as __post\}from"\.\/shared-app-A\.js"/);
-    assert.equal(fs.existsSync(path.join(assetsDir, "linux-settings-toggle-linux.js")), true);
-    assert.match(
-      linuxDesktopSource,
-      /import\{t as Toggle\}from"\.\/linux-settings-toggle-linux\.js"/,
-    );
-    assert.doesNotMatch(linuxDesktopSource, /React\.use(State|Effect|Callback)/);
-    assert.doesNotMatch(linuxDesktopSource, /function useLinuxSetting/);
-    assert.match(linuxDesktopSource, /class LinuxToggle extends React\.Component/);
-    assert.match(linuxDesktopSource, /class LinuxBuildInfoPanel extends React\.Component/);
-    assert.match(
-      linuxDesktopSource,
-      /control:\$\.jsx\(Toggle,\{checked:value,disabled:isLoading,onChange:this\.update,ariaLabel:label\}\)/,
-    );
-    assert.doesNotMatch(linuxDesktopSource, /function LinuxSwitch/);
-    assert.doesNotMatch(linuxDesktopSource, /bg-token-text-primary/);
-    assert.doesNotMatch(linuxDesktopSource, /translate-x-4/);
-
-    assert.match(
-      fs.readFileSync(path.join(assetsDir, "settings-sections-A.js"), "utf8"),
-      /slug:`linux-desktop`/,
-    );
-    assert.match(
-      fs.readFileSync(path.join(assetsDir, "settings-shared-A.js"), "utf8"),
-      /settings\.nav\.linux-desktop/,
-    );
-    const appMainSource = fs.readFileSync(path.join(assetsDir, "app-main-A.js"), "utf8");
-    assert.match(appMainSource, /linux-desktop-settings-linux\.js/);
-    assert.doesNotMatch(appMainSource, /keybinds-settings-linux\.js/);
-    const settingsPageSource = fs.readFileSync(path.join(assetsDir, "settings-page-A.js"), "utf8");
-    // The navigation bundle owns the icon map: linux-desktop must reuse the
-    // general-settings icon, never the lazy page component (the route lives in
-    // app-main-A.js). Injecting the page component here renders a broken nav icon.
-    assert.match(settingsPageSource, /"linux-desktop":q,"general-settings":q/);
-    assert.doesNotMatch(settingsPageSource, /"linux-desktop":codexLinuxDesktopSettings/);
-    assert.match(settingsPageSource, /slugs:\[`general-settings`,`linux-desktop`,`profile`/);
-    assert.match(settingsPageSource, /case`linux-desktop`:case`general-settings`/);
-
-    const secondResult = patchKeybindsSettingsAssets(extractedDir);
-    assert.equal(secondResult.matched, true);
-    assert.equal(secondResult.changed, 0);
-  } finally {
-    fs.rmSync(extractedDir, { recursive: true, force: true });
-  }
-});
-
 test("renders the generated Linux desktop settings page with working switches", () => {
   const { extractedDir, assetsDir } = createModernNativeKeyboardShortcutsSettingsFixture();
   try {
@@ -5132,9 +5004,29 @@ test("renders the generated Linux desktop settings page with working switches", 
       jsxs: (type, props = {}) => ({ type, props }),
     };
     const React = { Component, Fragment: "fragment" };
+    const nativeSettingsSource = fs.readFileSync(
+      path.join(assetsDir, "keyboard-shortcuts-settings-A.js"),
+      "utf8",
+    );
+    assert.match(
+      nativeSettingsSource,
+      /React as codexLinuxReact,\$ as codexLinuxJsx/,
+    );
+    const nativeRuntime = evaluateGeneratedSettingsModule(
+      nativeSettingsSource,
+      {
+        __jsxFactory: () => jsxRuntime,
+        __module: (initialize) => initialize,
+        __reactFactory: () => React,
+        __toESM: (value) => value,
+      },
+      "({React,$})",
+    );
+    assert.equal(nativeRuntime.React, React);
+    assert.equal(nativeRuntime.$, jsxRuntime);
     const Toggle = evaluateGeneratedSettingsModule(
       fs.readFileSync(path.join(assetsDir, "linux-settings-toggle-linux.js"), "utf8"),
-      { __jsxFactory: () => jsxRuntime },
+      { $: nativeRuntime.$ },
       "t",
     );
     const SettingsPage = ({ title, subtitle, children }) =>
@@ -5148,16 +5040,14 @@ test("renders the generated Linux desktop settings page with working switches", 
     const LinuxDesktopSettings = evaluateGeneratedSettingsModule(
       fs.readFileSync(path.join(assetsDir, linuxDesktopSettingsAsset), "utf8"),
       {
-        React,
+        $: nativeRuntime.$,
+        React: nativeRuntime.React,
         SettingsGroup,
         SettingsPage,
         SettingsRow,
         SettingsSection,
         Toggle,
-        __jsxFactory: () => jsxRuntime,
         __post: () => Promise.resolve({}),
-        __reactFactory: () => React,
-        __toESM: (value) => value,
       },
       "LinuxDesktopSettings",
     );
@@ -5201,7 +5091,7 @@ test("renders the generated Linux desktop settings page with working switches", 
 });
 
 test("skips old Keybinds settings generation when native Keyboard Shortcuts are missing", () => {
-  const { extractedDir, assetsDir } = createNativeKeyboardShortcutsSettingsFixture();
+  const { extractedDir, assetsDir } = createModernNativeKeyboardShortcutsSettingsFixture();
   try {
     fs.rmSync(path.join(assetsDir, "keyboard-shortcuts-settings-A.js"));
 
@@ -5212,6 +5102,54 @@ test("skips old Keybinds settings generation when native Keyboard Shortcuts are 
     assert.ok(warnings.some((warning) => warning.includes("current upstream Keyboard Shortcuts settings route is missing")));
     assert.equal(fs.existsSync(path.join(assetsDir, keybindsSettingsAsset)), false);
     assert.equal(fs.existsSync(path.join(assetsDir, linuxDesktopSettingsAsset)), false);
+  } finally {
+    fs.rmSync(extractedDir, { recursive: true, force: true });
+  }
+});
+
+test("skips Linux settings without writing assets when the initialized native runtime cannot be inferred", () => {
+  const { extractedDir, assetsDir } = createModernNativeKeyboardShortcutsSettingsFixture();
+  try {
+    const nativeSettingsPath = path.join(assetsDir, "keyboard-shortcuts-settings-A.js");
+    const nativeSettingsSource = fs.readFileSync(nativeSettingsPath, "utf8").replace(
+      "(0,React.useState)(null)",
+      "React.useState(null)",
+    );
+    fs.writeFileSync(nativeSettingsPath, nativeSettingsSource, "utf8");
+    const assetsBefore = new Map(
+      fs.readdirSync(assetsDir).map((name) => [
+        name,
+        fs.readFileSync(path.join(assetsDir, name), "utf8"),
+      ]),
+    );
+
+    const { value: result, warnings } = captureWarns(() => patchKeybindsSettingsAssets(extractedDir));
+
+    assert.equal(result.matched, false);
+    assert.equal(result.changed, 0);
+    assert.match(result.reason, /could not infer the initialized React runtime/);
+    assert.ok(warnings.some((warning) => warning.includes("could not infer the initialized React runtime")));
+    assert.deepEqual(
+      new Map(
+        fs.readdirSync(assetsDir).map((name) => [
+          name,
+          fs.readFileSync(path.join(assetsDir, name), "utf8"),
+        ]),
+      ),
+      assetsBefore,
+    );
+    assert.equal(fs.existsSync(path.join(assetsDir, linuxDesktopSettingsAsset)), false);
+    assert.equal(fs.existsSync(path.join(assetsDir, "linux-settings-toggle-linux.js")), false);
+
+    const report = createPatchReport();
+    captureWarns(() => patchExtractedApp(extractedDir, { report }));
+    const reportEntry = report.patches.find((patch) => patch.name === "keybinds-settings");
+    assert.equal(reportEntry.status, "skipped-optional");
+    assert.equal(reportEntry.ciPolicy, "optional");
+    assert.match(reportEntry.reason, /could not infer the initialized React runtime/);
+    assert.ok(
+      optionalDriftFromReport(report).some((drift) => drift.name === "keybinds-settings"),
+    );
   } finally {
     fs.rmSync(extractedDir, { recursive: true, force: true });
   }
@@ -5412,7 +5350,19 @@ test("adds Linux desktop settings when native shortcuts use a consolidated setti
     assert.match(linuxDesktopSource, /Open on GitHub/);
     assert.match(linuxDesktopSource, /href:url/);
     assert.doesNotMatch(linuxDesktopSource, /Source commit URL/);
-    assert.match(linuxDesktopSource, /import\{R as __reactFactory,I as __jsxFactory\}from"\.\/shared-runtime-A\.js"/);
+    assert.match(
+      linuxDesktopSource,
+      /import\{codexLinuxReact as React,codexLinuxJsx as \$\}from"\.\/keyboard-shortcuts-settings-A\.js"/,
+    );
+    assert.doesNotMatch(linuxDesktopSource, /__reactFactory|__jsxFactory/);
+    const keyboardShortcutsSource = fs.readFileSync(
+      path.join(assetsDir, "keyboard-shortcuts-settings-A.js"),
+      "utf8",
+    );
+    assert.match(
+      keyboardShortcutsSource,
+      /React as codexLinuxReact,\$ as codexLinuxJsx/,
+    );
     assert.match(
       linuxDesktopSource,
       /import\{t as Toggle\}from"\.\/linux-settings-toggle-linux\.js"/,
