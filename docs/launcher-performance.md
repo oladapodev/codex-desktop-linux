@@ -2,7 +2,7 @@
 
 ## Context
 
-This decision record captures a performance comparison between Codex Desktop
+This decision record captures a performance comparison between ChatGPT Desktop
 and another Electron 42 app (Claude Desktop) running side by side on the same
 X11 GNOME 4K host, what the launcher changed as a result, and — just as
 importantly — what was reviewed and deliberately left alone so future work

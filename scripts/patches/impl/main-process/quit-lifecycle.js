@@ -1,50 +1,26 @@
 "use strict";
 
 function applyLinuxQuitGuardPatch(currentSource) {
-  let patchedSource = currentSource;
-
-  const quitGuardNeedle = "let n=require(`electron`),i=require(`node:path`),o=require(`node:fs`);";
-  const quitGuardSuffix =
-    "let codexLinuxQuitInProgress=!1,codexLinuxExplicitQuitApproved=!1,codexLinuxExplicitQuitDrainTimeoutMs=3e3,codexLinuxMarkQuitInProgress=()=>{codexLinuxQuitInProgress=!0},codexLinuxPrepareForExplicitQuit=()=>{codexLinuxExplicitQuitApproved=!0,codexLinuxMarkQuitInProgress()},codexLinuxShouldBypassQuitPrompt=()=>codexLinuxExplicitQuitApproved===!0,codexLinuxIsQuitInProgress=()=>codexLinuxQuitInProgress===!0;";
-  const quitGuardPatch = `${quitGuardNeedle}${quitGuardSuffix}`;
-
-  if (patchedSource.includes("codexLinuxExplicitQuitApproved=!1")) {
-    return patchedSource;
-  }
-
-  if (patchedSource.includes(quitGuardNeedle)) {
-    return patchedSource.replace(quitGuardNeedle, quitGuardPatch);
-  }
-
-  const currentCommaQuitGuardNeedle =
-    /let ([A-Za-z_$][\w$]*)=(?:codexLinuxPatchExternalOpen\()?require\(`electron`\)(?:\))?,([A-Za-z_$][\w$]*)=require\(`node:path`\),([A-Za-z_$][\w$]*)=require\(`node:fs`\);/;
-  const currentCommaQuitGuardMatch = patchedSource.match(currentCommaQuitGuardNeedle);
-  if (currentCommaQuitGuardMatch != null) {
-    const matchedPrefix = currentCommaQuitGuardMatch[0];
-    return patchedSource.replace(matchedPrefix, `${matchedPrefix}${quitGuardSuffix}`);
+  if (currentSource.includes("codexLinuxExplicitQuitApproved=!1")) {
+    return currentSource;
   }
 
   const currentBundlerQuitGuardNeedle =
-    /let ([A-Za-z_$][\w$]*)=(?:codexLinuxPatchExternalOpen\()?require\(`electron`\)(?:\))?;(?:\1=[^;]+;)?[\s\S]{0,500}?(?:let|,)\s*([A-Za-z_$][\w$]*)=require\(`node:path`\);(?:\2=[^;]+;)?[\s\S]{0,500}?(?:let|,)\s*([A-Za-z_$][\w$]*)=require\(`node:fs`\);(?:\3=[^;]+;)?/;
-  const currentBundlerQuitGuardMatch = patchedSource.match(currentBundlerQuitGuardNeedle);
+    /(?:let|,)\s*([A-Za-z_$][\w$]*)=require\(`electron`\);\1=[^;]+;[\s\S]{0,500}?(?:let|,)\s*([A-Za-z_$][\w$]*)=require\(`node:path`\);\2=[^;]+;[\s\S]{0,500}?(?:let|,)\s*([A-Za-z_$][\w$]*)=require\(`node:fs`\);\3=[^;]+;/;
+  const currentBundlerQuitGuardMatch = currentSource.match(currentBundlerQuitGuardNeedle);
   if (currentBundlerQuitGuardMatch != null) {
     const matchedPrefix = currentBundlerQuitGuardMatch[0];
-    return patchedSource.replace(matchedPrefix, `${matchedPrefix}${quitGuardSuffix}`);
+    const electronVar = currentBundlerQuitGuardMatch[1];
+    const quitGuardSuffix =
+      `let codexLinuxTray=null,codexLinuxRegisterTray=e=>(codexLinuxTray=e,e),codexLinuxDestroyTray=()=>{if(process.platform!==\`linux\`)return;let e=codexLinuxTray;codexLinuxTray=null;try{e?.destroy()}catch{}},codexLinuxQuitInProgress=!1,codexLinuxExplicitQuitApproved=!1,codexLinuxExplicitQuitDrainTimeoutMs=3e3,codexLinuxMarkQuitInProgress=()=>{codexLinuxQuitInProgress=!0,codexLinuxDestroyTray()},codexLinuxPrepareForExplicitQuit=()=>{codexLinuxExplicitQuitApproved=!0,codexLinuxMarkQuitInProgress()},codexLinuxShouldBypassQuitPrompt=()=>codexLinuxExplicitQuitApproved===!0,codexLinuxIsQuitInProgress=()=>codexLinuxQuitInProgress===!0;${electronVar}.app.on(\`before-quit\`,()=>codexLinuxDestroyTray());`;
+    return currentSource.replace(matchedPrefix, `${matchedPrefix}${quitGuardSuffix}`);
   }
 
-  const splitQuitGuardNeedle =
-    /let ([A-Za-z_$][\w$]*)=require\(`electron`\);(?:\1=[^;]+;)?let ([A-Za-z_$][\w$]*)=require\(`node:path`\);(?:\2=[^;]+;)?let ([A-Za-z_$][\w$]*)=require\(`node:fs`\);(?:\3=[^;]+;)?/;
-  const splitQuitGuardMatch = patchedSource.match(splitQuitGuardNeedle);
-  if (splitQuitGuardMatch != null) {
-    const matchedPrefix = splitQuitGuardMatch[0];
-    return patchedSource.replace(matchedPrefix, `${matchedPrefix}${quitGuardSuffix}`);
-  }
-
-  if (patchedSource.includes("require(`electron`)") && patchedSource.includes("require(`node:path`)")) {
+  if (currentSource.includes("require(`electron`)") && currentSource.includes("require(`node:path`)")) {
     console.warn("WARN: Could not find Linux quit guard insertion point — skipping explicit quit-state patch");
   }
 
-  return patchedSource;
+  return currentSource;
 }
 
 function linuxExplicitQuitExpression() {
