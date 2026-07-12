@@ -23,6 +23,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Remote mobile control now relies on the current upstream account-enrollment
+  compatibility and Connections tab resolver instead of patching duplicate
+  Linux-specific fallbacks into those paths.
 - Remote notification hydration, replay, completed-item recovery, and remote
   terminal-status recovery are no longer part of the default Linux patch set and
   remain owned by the disabled-by-default `remote-mobile-control` feature.
@@ -34,8 +37,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 - Remote mobile control now patches the current upstream webview chunks for
   feature sync, settings visibility, host enablement, and active conversation
-  status. The enablement bridge also accepts the current bundle ordering where
-  its log marker is declared after the request handler.
+  status. Revoking the final controller now also clears the current mobile setup
+  state. The enablement bridge accepts the current bundle ordering where its log
+  marker is declared after the request handler.
 - Automated user-local updates no longer inherit or set developer overrides
   that could replace a running Electron app or bypass DMG acceptance. Manual
   and timer rebuilds now fail safely at promotion, transactional installs retain
