@@ -1,5 +1,10 @@
 # Upstream Release Monitor Implementation Plan
 
+> [!NOTE]
+> This document may not reflect the current implementation.
+> See the final report for up-to-date state:
+> [Final Report](../reports/upstream-release-monitor.md)
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use compose:subagent (recommended) or compose:execute to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Automatically publish isolated preview packages for detected upstream PR heads and stable latest releases for upstream `main` changes, with detailed notes and a persistent activity dashboard.

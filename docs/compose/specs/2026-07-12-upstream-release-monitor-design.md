@@ -1,5 +1,10 @@
 # Upstream Release Monitor Design
 
+> [!NOTE]
+> This document may not reflect the current implementation.
+> See the final report for up-to-date state:
+> [Final Report](../reports/upstream-release-monitor.md)
+
 ## [S1] Goal
 
 The fork must poll `ilysenko/codex-desktop-linux`, expose current upstream pull-request activity, build each newly detected open pull-request head for testing, and publish stable builds after upstream changes reach `main`. The automation must avoid rebuilding an unchanged source SHA and must never expose release credentials to code from an unmerged pull request.
